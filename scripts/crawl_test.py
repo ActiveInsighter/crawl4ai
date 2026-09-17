@@ -61,30 +61,21 @@ def markdown_parts(markdown: Any) -> tuple[str, str]:
 def select_article(
     soup: BeautifulSoup, preferred_selector: str | None = None
 ) -> tuple[Tag, str]:
-    """Pick the largest likely article container, preferring known documentation selectors."""
+    """Pick the best article container, honoring selector priority before size."""
     selectors = ((preferred_selector,) if preferred_selector else ()) + ARTICLE_SELECTORS
-    seen: set[int] = set()
-    candidates: list[tuple[int, int, str, Tag]] = []
 
-    for priority, selector in enumerate(selectors):
+    for selector in selectors:
         if not selector:
             continue
         try:
             nodes = soup.select(selector)
         except Exception:
             continue
-        for node in nodes:
-            marker = id(node)
-            if marker in seen:
-                continue
-            seen.add(marker)
-            text_len = len(node.get_text(" ", strip=True))
-            if text_len:
-                candidates.append((text_len, -priority, selector, node))
-
-    if candidates:
-        _, _, selector, node = max(candidates, key=lambda item: (item[0], item[1]))
-        return node, selector
+        candidates = [
+            node for node in nodes if len(node.get_text(" ", strip=True)) > 0
+        ]
+        if candidates:
+            return max(candidates, key=lambda node: len(node.get_text(" ", strip=True))), selector
 
     if soup.body:
         return soup.body, "body"
@@ -152,6 +143,8 @@ def replace_math_with_tokens(article: Tag) -> tuple[list[dict[str, Any]], dict[s
     for node in candidates:
         if not isinstance(node, Tag) or node.parent is None:
             continue
+        if not any(parent is article for parent in node.parents):
+            continue
 
         container = node
         if "katex" in (node.get("class") or []):
@@ -215,7 +208,11 @@ def export_inline_svgs(article: Tag, output_dir: Path) -> list[dict[str, Any]]:
         path.write_text(str(svg), encoding="utf-8")
 
         relative = PurePosixPath("assets", "svg", filename).as_posix()
-        image = article.new_tag("img", src=relative, alt=alt)
+        image = BeautifulSoup("<img/>", "html.parser").img
+        if image is None:
+            continue
+        image["src"] = relative
+        image["alt"] = alt
         svg.replace_with(image)
 
         manifest.append(
