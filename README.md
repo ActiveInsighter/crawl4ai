@@ -8,19 +8,30 @@ A GitHub Actions test harness for evaluating [Crawl4AI](https://github.com/uncle
 
 The default article selector is `.td-content`; it can be overridden from `workflow_dispatch` or with `--article-selector` locally.
 
-## High-fidelity export pipeline
+## Two-track export pipeline
 
-The crawler keeps Crawl4AI as the browser/DOM acquisition layer, then post-processes the article DOM before converting it back to Markdown:
+The project deliberately keeps **semantic extraction** and **visual preservation** separate.
 
-1. Fetch the HTTP source and also crawl the rendered page with Chromium.
+### 1. AI / Markdown track
+
+1. Fetch the HTTP source and crawl the rendered page with Crawl4AI + Chromium.
 2. Select the article root instead of converting the whole page shell.
-3. Recover formula TeX when it is actually available from KaTeX/MathJax/MathML annotations, supported TeX attributes, or source delimiters such as `$$...$$`, `\(...\)` and `\[...\]`.
-4. Replace recoverable formulas with safe tokens before Markdown conversion, then restore them as `$...$` or `$$...$$`.
-5. Never invent TeX when the served page has already discarded the original expression; unrecovered formulas remain in the rendered article DOM, are converted by the normal Markdown path as best-effort visible text, and are recorded in `formulas.json`.
-6. Export content SVG diagrams to standalone `.svg` files while removing decorative/`aria-hidden` SVG icons.
-7. Download normal article images into `assets/images/` and rewrite their paths locally.
-8. Normalize article links to absolute URLs.
-9. Package the complete result as a Windows-compatible ZIP.
+3. Recover formula TeX only when authoritative TeX data is actually present in KaTeX/MathJax/MathML annotations, TeX attributes, or original source delimiters.
+4. Never invent TeX when the served source no longer contains it; record the unrecovered formula in `formulas.json`.
+5. Export content SVG diagrams as standalone `.svg` files, skip decorative SVG icons, download ordinary images, and rewrite asset paths locally.
+6. Generate `content.md` for AI/RAG/document workflows.
+
+### 2. Browser-fidelity track
+
+Some pages render KaTeX correctly in Chrome even though the original TeX source is no longer available. For those pages, exact source reconstruction is unnecessary for visual preservation.
+
+The Action therefore opens the **original URL directly in Playwright Chromium**, waits for the live `.katex` DOM to finish rendering, and then, from that same live browser page:
+
+1. saves `page.content()` as `browser-rendered.html`;
+2. records the rendered KaTeX text in `rendered-export.json`;
+3. calls Chromium `page.pdf()` directly and saves `browser-rendered.pdf`.
+
+There is no Markdown/HTML round trip in this PDF path. It mirrors the browser-print approach and preserves the already-rendered formula visually.
 
 ## Latest real-page result
 
@@ -35,35 +46,46 @@ The current Action has been tested against the target page with Crawl4AI 0.9.3 a
 - normal images downloaded: `1`
 - image download failures: `0`
 - rendered formulas detected: `1`
-- exact TeX recovered: `0`
-- post-processing unit tests: `5/5` passing
+- exact TeX recovered from source: `0`
+- live-browser KaTeX nodes captured: `1`
+- live-browser formula text: `EA=(EBX)+(ECX)×4+8`
+- browser-rendered PDF: generated successfully, about 1.30 MB
+- post-processing/render-export unit tests: `6/6` passing
 
-### Why the formula is not reconstructed as LaTeX
+### Formula behavior on this page
 
-For this page, both the HTTP source and the Chromium-rendered DOM already contain KaTeX's visual HTML spans but no `application/x-tex` annotation, MathML source, TeX data attribute, or original `$$...$$` / `\(...\)` / `\[...\]` delimiter text. That means the original TeX expression is no longer present in the served page.
+The original TeX expression cannot be recovered exactly from the served source because the page no longer exposes authoritative TeX/MathML source data. However, the browser-rendered formula **can** be preserved correctly.
 
-The crawler therefore intentionally does **not** guess a replacement LaTeX expression. It keeps the available rendered representation and records the recovery status. Exact TeX recovery for such pages requires access to the original Markdown/content source or another authoritative source containing the TeX.
+The live Chromium capture contains the complete KaTeX DOM and the browser-printed PDF renders the formula correctly as:
+
+`EA = (EBX) + (ECX) × 4 + 8`
+
+So the limitation is specifically **exact LaTeX source recovery**, not formula preservation.
 
 ## What the action exports
 
-The workflow `.github/workflows/crawl4ai-test.yml` installs the pinned dependencies and Chromium, runs unit tests, crawls the page, then uploads `crawl4ai-csgraduates-result` containing:
+The workflow `.github/workflows/crawl4ai-test.yml` uploads `crawl4ai-csgraduates-result` containing:
 
-- `content.md` — post-processed article Markdown with local asset paths and recoverable formulas restored
-- `crawl4ai-raw.md` — Crawl4AI's direct Markdown conversion for comparison/debugging
-- `source.html` — HTTP response before browser-side rendering
-- `rendered.html` — Crawl4AI `result.html` after browser rendering
+- `content.md` — AI-friendly article Markdown with localized assets
+- `crawl4ai-raw.md` — Crawl4AI direct Markdown for comparison/debugging
+- `source.html` — raw HTTP response
+- `rendered.html` — Crawl4AI `result.html`
+- `rendered-standalone.html` — replayable version of Crawl4AI rendered HTML with an explicit base URL
+- `browser-rendered.html` — **live Chromium DOM captured directly from the original page after rendering**
+- `browser-rendered.pdf` — **PDF printed directly from that same live Chromium page**
+- `rendered-export.json` — live-browser status, KaTeX text/counts, DOM size and PDF metadata
 - `raw.html` — compatibility alias of `rendered.html`
 - `cleaned.html` — Crawl4AI cleaned HTML
 - `article.html` — post-processed article DOM used to generate `content.md`
-- `source-formulas.json` — formula candidates found in the pre-render HTTP source
-- `formulas.json` — recovered/unrecovered formula manifest and recovery source
-- `assets.json` — downloaded image and exported SVG manifest, including failures and skipped decorative SVG count
-- `assets/images/*` — locally downloaded image resources
+- `source-formulas.json` — formula candidates found in the HTTP source
+- `formulas.json` — exact TeX recovery manifest
+- `assets.json` — downloaded image/exported SVG manifest
+- `assets/images/*` — localized image resources
 - `assets/svg/*` — exported inline article SVG diagrams
-- `metadata.json` — crawl status plus article/formula/SVG/image counts
+- `metadata.json` — crawl status and extraction counts
 - `links.json` — Crawl4AI discovered links
 - `media.json` — Crawl4AI discovered media
-- `crawl4ai-csgraduates-result.zip` — packaged bundle suitable for Windows extraction
+- `crawl4ai-csgraduates-result.zip` — Windows-compatible bundle
 
 ## Local usage
 
@@ -74,4 +96,12 @@ python -m unittest discover -s tests -v
 python scripts/crawl_test.py \
   --url "https://csgraduates.com/constitution_principle/instruction/concepts/" \
   --article-selector ".td-content"
+
+python scripts/export_rendered.py \
+  --input artifacts/crawl/rendered.html \
+  --base-url "https://csgraduates.com/constitution_principle/instruction/concepts/" \
+  --output-replay-html artifacts/crawl/rendered-standalone.html \
+  --output-live-html artifacts/crawl/browser-rendered.html \
+  --output-pdf artifacts/crawl/browser-rendered.pdf \
+  --metadata artifacts/crawl/rendered-export.json
 ```
