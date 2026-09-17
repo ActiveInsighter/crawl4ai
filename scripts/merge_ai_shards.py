@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Merge AI shard ZIPs into a small, clean final archive."""
+"""Merge AI shard ZIPs into the final browser-rich AI archive."""
 
 from __future__ import annotations
 
@@ -33,11 +33,14 @@ def attach_local_paths(items: list[dict], page_map: dict[str, dict]) -> None:
             base = str(record["output_dir"])
             item["markdown"] = f"{base}/content.md"
             item["html"] = f"{base}/content.html"
+            if record.get("browser_rendered"):
+                item["rendered_html"] = f"{base}/browser-rendered.html"
         attach_local_paths(item.get("children", []), page_map)
 
 
 def render_navigation(items: list[dict]) -> str:
     lines = ["# csgraduates.com 文档目录", ""]
+
     def render(nodes: list[dict], depth: int) -> None:
         for item in nodes:
             indent = "  " * depth
@@ -47,10 +50,13 @@ def render_navigation(items: list[dict]) -> str:
             if item.get("markdown"):
                 local.append(f"[Markdown]({item['markdown']})")
             if item.get("html"):
-                local.append(f"[HTML]({item['html']})")
+                local.append(f"[Article HTML]({item['html']})")
+            if item.get("rendered_html"):
+                local.append(f"[Rendered HTML]({item['rendered_html']})")
             suffix = " — " + " · ".join(local) if local else ""
             lines.append(f"{indent}- [{title}]({source}){suffix}")
             render(item.get("children", []), depth + 1)
+
     render(items, 0)
     lines.append("")
     return "\n".join(lines)
@@ -88,6 +94,8 @@ def merge(shards_dir: Path, output_dir: Path) -> dict:
                 "page_count": manifest.get("page_count"),
                 "success_count": manifest.get("success_count"),
                 "failure_count": manifest.get("failure_count"),
+                "browser_render_success_count": manifest.get("browser_render_success_count"),
+                "browser_render_failure_count": manifest.get("browser_render_failure_count"),
                 "elapsed_seconds": manifest.get("elapsed_seconds"),
             })
             for record in manifest.get("pages", []):
@@ -105,15 +113,19 @@ def merge(shards_dir: Path, output_dir: Path) -> dict:
     attach_local_paths(navigation, page_map)
 
     failures = [record for record in records if not record.get("success")]
+    browser_render_failures = [record for record in records if not record.get("browser_rendered")]
     final_manifest = {
         "source": "https://csgraduates.com/",
-        "format": "csgraduates-ai-archive-v1",
-        "description": "AI-readable archive: Markdown + cleaned article HTML + localized images/SVG. No PDF or browser snapshot.",
+        "format": "csgraduates-ai-archive-v2",
+        "description": "AI-readable archive: full browser-rendered DOM + cleaned article HTML + Markdown + localized images/SVG. No PDF.",
         "page_count": len(records),
         "success_count": len(records) - len(failures),
         "failure_count": len(failures),
+        "browser_render_success_count": len(records) - len(browser_render_failures),
+        "browser_render_failure_count": len(browser_render_failures),
         "pages": records,
         "failures": failures,
+        "browser_render_failures": browser_render_failures,
         "shards": shard_stats,
     }
     (output_dir / "manifest.json").write_text(
@@ -125,18 +137,26 @@ def merge(shards_dir: Path, output_dir: Path) -> dict:
     (output_dir / "navigation.md").write_text(render_navigation(navigation), encoding="utf-8")
     (output_dir / "README.md").write_text(
         "# csgraduates.com AI archive\n\n"
-        "This archive is intentionally compact. It contains no PDF, browser screenshot, raw full-page HTML, or duplicate crawler output.\n\n"
+        "This archive keeps the full Chromium-rendered DOM for maximum fidelity while still providing compact AI-friendly derivatives. It intentionally contains no PDF.\n\n"
         "## Structure\n\n"
         "- `navigation.md` / `navigation.json`: site document hierarchy and local links.\n"
-        "- `manifest.json`: source URL, page status, output path and asset counts for every page.\n"
-        "- `pages/<original-url-path>/content.md`: AI-friendly Markdown.\n"
-        "- `pages/<original-url-path>/content.html`: cleaned article HTML with rendered math DOM preserved.\n"
+        "- `manifest.json`: source URL, page status, output path, rendered-HTML status and asset counts for every page.\n"
+        "- `pages/<original-url-path>/browser-rendered.html`: full page DOM after Chromium loaded and executed the page. This is the richest HTML source.\n"
+        "- `pages/<original-url-path>/content.html`: cleaned article HTML derived from the browser-rendered DOM.\n"
+        "- `pages/<original-url-path>/content.md`: AI-friendly Markdown derived from the same rendered DOM.\n"
         "- `pages/<original-url-path>/assets/images/`: localized raster images when present.\n"
         "- `pages/<original-url-path>/assets/svg/`: standalone SVG diagrams with SVG case/style fidelity repaired.\n\n"
-        "Use Markdown for normal reading and HTML/SVG as a fallback when formulas or diagrams need more fidelity.\n",
+        "For maximum information fidelity, read `browser-rendered.html`; use `content.md` for fast text retrieval and `content.html`/SVG for focused formula or diagram inspection.\n",
         encoding="utf-8",
     )
-    print(json.dumps({k: v for k, v in final_manifest.items() if k not in {"pages", "failures", "shards"}}, ensure_ascii=False, indent=2), flush=True)
+    print(
+        json.dumps(
+            {k: v for k, v in final_manifest.items() if k not in {"pages", "failures", "browser_render_failures", "shards"}},
+            ensure_ascii=False,
+            indent=2,
+        ),
+        flush=True,
+    )
     return final_manifest
 
 

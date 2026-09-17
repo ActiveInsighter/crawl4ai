@@ -117,17 +117,21 @@ jobs:
           cache: pip
           cache-dependency-path: requirements-ai.txt
 
-      - name: Install lightweight dependencies
-        run: pip install -r requirements-ai.txt
+      - name: Install archive dependencies and Chromium
+        run: |
+          pip install -r requirements-ai.txt
+          pip install "playwright>=1.55,<2"
+          python -m playwright install --with-deps chromium
 
-      - name: Archive HTML and Markdown with live progress
+      - name: Archive browser-rendered HTML and Markdown with live progress
         run: |
           python scripts/crawl_site_ai_shard.py \
             --urls-b64 "$SHARD_URLS_B64" \
             --shard-name "$SHARD_LABEL" \
             --output-dir artifacts/site \
             --article-selector .td-content \
-            --concurrency 10
+            --concurrency 10 \
+            --render-concurrency 4
 
       - name: Package shard ZIP
         run: |
@@ -149,7 +153,13 @@ jobs:
             python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
           import json
           data=json.load(open('artifacts/site/shard-manifest.json', encoding='utf-8'))
-          print(f"Pages: {data['page_count']} | Success: {data['success_count']} | Failed: {data['failure_count']} | Elapsed: {data['elapsed_seconds']}s")
+          print(
+              f"Pages: {data['page_count']} | Success: {data['success_count']} | "
+              f"Failed: {data['failure_count']} | Browser rendered: "
+              f"{data.get('browser_render_success_count', 0)} | "
+              f"Render failed: {data.get('browser_render_failure_count', 0)} | "
+              f"Elapsed: {data['elapsed_seconds']}s"
+          )
           PY
           fi
 
@@ -164,7 +174,7 @@ jobs:
           compression-level: 0
 
   merge:
-    name: Merge compact AI archive
+    name: Merge AI archive with rendered HTML
     needs:
       - prepare
       - archive
@@ -187,7 +197,7 @@ jobs:
           path: artifacts/shards
           merge-multiple: true
 
-      - name: Merge compact archive
+      - name: Merge archive
         run: |
           python scripts/merge_ai_shards.py \
             --shards-dir artifacts/shards \
@@ -219,7 +229,7 @@ jobs:
           PY
           fi
 
-      - name: Upload compact AI archive
+      - name: Upload AI archive
         if: always()
         uses: actions/upload-artifact@v7
         with:
