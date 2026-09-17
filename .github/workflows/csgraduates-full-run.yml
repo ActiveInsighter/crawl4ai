@@ -1,0 +1,102 @@
+name: Full csgraduates archive
+
+on:
+  push:
+    branches:
+      - run/csgraduates-full-archive
+    paths:
+      - .github/workflows/csgraduates-full-run.yml
+  workflow_dispatch:
+
+concurrency:
+  group: csgraduates-full-archive
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  archive-all:
+    name: Archive all discovered documents
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Archive all csgraduates documents
+        run: |
+          python scripts/crawl_site_fast.py \
+            --base-url "https://csgraduates.com/" \
+            --output-dir artifacts/site \
+            --article-selector .td-content \
+            --max-pages 0 \
+            --discovery-limit 5000 \
+            --crawl-concurrency 3 \
+            --pdf-concurrency 2
+
+      - name: Export real sidebar navigation
+        run: |
+          python scripts/build_navigation.py \
+            --archive-root artifacts/site \
+            --base-url "https://csgraduates.com/"
+
+      - name: Package Windows-compatible ZIP
+        run: |
+          python - <<'PY'
+          import shutil
+          shutil.make_archive(
+              "artifacts/csgraduates-site-archive",
+              "zip",
+              root_dir="artifacts",
+              base_dir="site",
+          )
+          PY
+
+      - name: Add final summary
+        if: always()
+        shell: bash
+        run: |
+          if [ -f artifacts/site/summary.json ]; then
+            echo '## Full csgraduates archive' >> "$GITHUB_STEP_SUMMARY"
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            cat artifacts/site/summary.json >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -f artifacts/site/navigation.json ]; then
+            echo '## Navigation' >> "$GITHUB_STEP_SUMMARY"
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            python -c "import json; d=json.load(open('artifacts/site/navigation.json',encoding='utf-8')); print(json.dumps({k:v for k,v in d.items() if k!='sections'},ensure_ascii=False,indent=2))" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -f artifacts/site/failures.json ]; then
+            echo '## Failures' >> "$GITHUB_STEP_SUMMARY"
+            python -c "import json; print(len(json.load(open('artifacts/site/failures.json',encoding='utf-8'))))" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload complete archive ZIP
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: csgraduates-complete-archive-${{ github.run_id }}
+          path: artifacts/csgraduates-site-archive.zip
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 0
