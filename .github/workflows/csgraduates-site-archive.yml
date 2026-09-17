@@ -42,6 +42,7 @@ on:
       - scripts/crawl_site.py
       - scripts/crawl_site_fast.py
       - scripts/site_discovery.py
+      - scripts/build_navigation.py
       - tests/**
       - .github/workflows/csgraduates-site-archive.yml
 
@@ -107,6 +108,13 @@ jobs:
             --pdf-concurrency "$PDF_CONCURRENCY" \
             "${extra_args[@]}"
 
+      - name: Export real sidebar navigation
+        if: ${{ env.SKIP_PDF != 'true' }}
+        run: |
+          python scripts/build_navigation.py \
+            --archive-root artifacts/site \
+            --base-url "$BASE_URL"
+
       - name: Package Windows-compatible ZIP
         if: always()
         shell: bash
@@ -137,6 +145,16 @@ jobs:
             echo '## Discovery' >> "$GITHUB_STEP_SUMMARY"
             echo '```json' >> "$GITHUB_STEP_SUMMARY"
             cat artifacts/site/discovery.json >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -f artifacts/site/navigation.json ]; then
+            echo '## Sidebar navigation' >> "$GITHUB_STEP_SUMMARY"
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          data = json.load(open('artifacts/site/navigation.json', encoding='utf-8'))
+          print(json.dumps({k: v for k, v in data.items() if k != 'sections'}, ensure_ascii=False, indent=2))
+          PY
             echo '```' >> "$GITHUB_STEP_SUMMARY"
           fi
 
