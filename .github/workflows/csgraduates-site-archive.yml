@@ -40,6 +40,8 @@ on:
       - requirements.txt
       - scripts/crawl_test.py
       - scripts/crawl_site.py
+      - scripts/crawl_site_fast.py
+      - scripts/site_discovery.py
       - tests/**
       - .github/workflows/csgraduates-site-archive.yml
 
@@ -95,7 +97,7 @@ jobs:
             extra_args+=(--skip-pdf)
           fi
 
-          python scripts/crawl_site.py \
+          python scripts/crawl_site_fast.py \
             --base-url "$BASE_URL" \
             --output-dir artifacts/site \
             --article-selector .td-content \
