@@ -11,6 +11,7 @@ on:
       - scripts/crawl_site_static.py
       - scripts/crawl_site_shard.py
       - scripts/shard_plan.py
+      - scripts/shard_plan_balanced.py
       - scripts/merge_shards.py
       - scripts/build_navigation.py
       - tests/**
@@ -31,7 +32,7 @@ permissions:
 
 jobs:
   prepare:
-    name: Plan archive shards
+    name: Plan balanced archive shards
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -49,13 +50,14 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Build shard matrix from sitemap
+      - name: Build balanced matrix from sitemap
         id: plan
         run: |
           mkdir -p artifacts
-          python scripts/shard_plan.py \
+          python scripts/shard_plan_balanced.py \
             --base-url "https://csgraduates.com/" \
             --chunk-size "$CHUNK_SIZE" \
+            --tiny-study-threshold 4 \
             --output artifacts/shard-plan.json \
             --github-output "$GITHUB_OUTPUT"
 
@@ -97,7 +99,7 @@ jobs:
     if: ${{ needs.prepare.result == 'success' && needs.test.result == 'success' }}
     strategy:
       fail-fast: false
-      max-parallel: 12
+      max-parallel: 10
       matrix:
         include: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     runs-on: ubuntu-latest
@@ -131,9 +133,9 @@ jobs:
             --shard-name "$SHARD_LABEL" \
             --output-dir artifacts/site \
             --article-selector .td-content \
-            --fetch-concurrency 12 \
-            --process-concurrency 8 \
-            --pdf-concurrency 4 \
+            --fetch-concurrency 6 \
+            --process-concurrency 6 \
+            --pdf-concurrency 3 \
             --asset-wait-ms 8000
 
       - name: Package shard ZIP
