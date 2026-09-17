@@ -1,0 +1,140 @@
+name: Archive csgraduates site
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: Site root to discover and archive
+        required: true
+        default: https://csgraduates.com/
+      max_pages:
+        description: Maximum pages to archive; 0 means all discovered pages
+        required: true
+        default: "0"
+      crawl_concurrency:
+        description: Crawl4AI concurrent browser sessions
+        required: true
+        default: "3"
+      pdf_concurrency:
+        description: Concurrent Chromium PDF exports
+        required: true
+        default: "2"
+      fetch_source_html:
+        description: Also fetch and save pre-render HTTP source for TeX recovery
+        required: false
+        type: boolean
+        default: false
+      skip_pdf:
+        description: Skip browser-rendered HTML/PDF export
+        required: false
+        type: boolean
+        default: false
+  push:
+    branches:
+      - feat/csgraduates-full-site-archive
+    paths:
+      - requirements.txt
+      - scripts/crawl_test.py
+      - scripts/crawl_site.py
+      - tests/**
+      - .github/workflows/csgraduates-site-archive.yml
+
+permissions:
+  contents: read
+
+jobs:
+  archive:
+    name: Discover and archive site
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      BASE_URL: ${{ inputs.base_url || 'https://csgraduates.com/' }}
+      MAX_PAGES: ${{ github.event_name == 'workflow_dispatch' && inputs.max_pages || '3' }}
+      CRAWL_CONCURRENCY: ${{ inputs.crawl_concurrency || '3' }}
+      PDF_CONCURRENCY: ${{ inputs.pdf_concurrency || '2' }}
+      FETCH_SOURCE_HTML: ${{ inputs.fetch_source_html || 'false' }}
+      SKIP_PDF: ${{ inputs.skip_pdf || 'false' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Discover and archive documents
+        shell: bash
+        run: |
+          extra_args=()
+          if [[ "$FETCH_SOURCE_HTML" == "true" ]]; then
+            extra_args+=(--fetch-source-html)
+          fi
+          if [[ "$SKIP_PDF" == "true" ]]; then
+            extra_args+=(--skip-pdf)
+          fi
+
+          python scripts/crawl_site.py \
+            --base-url "$BASE_URL" \
+            --output-dir artifacts/site \
+            --article-selector .td-content \
+            --max-pages "$MAX_PAGES" \
+            --crawl-concurrency "$CRAWL_CONCURRENCY" \
+            --pdf-concurrency "$PDF_CONCURRENCY" \
+            "${extra_args[@]}"
+
+      - name: Package Windows-compatible ZIP
+        if: always()
+        shell: bash
+        run: |
+          if [ -d artifacts/site ]; then
+            python - <<'PY'
+          import shutil
+          shutil.make_archive(
+              "artifacts/csgraduates-site-archive",
+              "zip",
+              root_dir="artifacts",
+              base_dir="site",
+          )
+          PY
+          fi
+
+      - name: Add archive summary
+        if: always()
+        shell: bash
+        run: |
+          if [ -f artifacts/site/summary.json ]; then
+            echo '## csgraduates.com archive' >> "$GITHUB_STEP_SUMMARY"
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            cat artifacts/site/summary.json >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -f artifacts/site/discovery.json ]; then
+            echo '## Discovery' >> "$GITHUB_STEP_SUMMARY"
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            cat artifacts/site/discovery.json >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload site archive
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: csgraduates-site-archive-${{ github.run_id }}
+          path: |
+            artifacts/site/
+            artifacts/csgraduates-site-archive.zip
+          if-no-files-found: warn
+          retention-days: 14
