@@ -60,15 +60,16 @@ jobs:
             --article-selector "$ARTICLE_SELECTOR" \
             --output-dir artifacts/crawl
 
-      - name: Replay rendered HTML and print PDF
+      - name: Capture live rendered HTML and print PDF
         env:
           TARGET_URL: ${{ inputs.url || 'https://csgraduates.com/constitution_principle/instruction/concepts/' }}
         run: |
           python scripts/export_rendered.py \
             --input artifacts/crawl/rendered.html \
             --base-url "$TARGET_URL" \
-            --output-html artifacts/crawl/rendered-standalone.html \
-            --output-pdf artifacts/crawl/rendered-page.pdf \
+            --output-replay-html artifacts/crawl/rendered-standalone.html \
+            --output-live-html artifacts/crawl/browser-rendered.html \
+            --output-pdf artifacts/crawl/browser-rendered.pdf \
             --metadata artifacts/crawl/rendered-export.json
 
       - name: Package Windows-compatible ZIP
@@ -95,7 +96,7 @@ jobs:
             echo '```' >> "$GITHUB_STEP_SUMMARY"
           fi
           if [ -f artifacts/crawl/rendered-export.json ]; then
-            echo '## Rendered HTML / PDF replay' >> "$GITHUB_STEP_SUMMARY"
+            echo '## Live browser HTML / PDF' >> "$GITHUB_STEP_SUMMARY"
             echo '```json' >> "$GITHUB_STEP_SUMMARY"
             cat artifacts/crawl/rendered-export.json >> "$GITHUB_STEP_SUMMARY"
             echo '```' >> "$GITHUB_STEP_SUMMARY"
