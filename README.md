@@ -16,7 +16,7 @@ The crawler keeps Crawl4AI as the browser/DOM acquisition layer, then post-proce
 2. Select the article root instead of converting the whole page shell.
 3. Recover formula TeX when it is actually available from KaTeX/MathJax/MathML annotations, supported TeX attributes, or source delimiters such as `$$...$$`, `\(...\)` and `\[...\]`.
 4. Replace recoverable formulas with safe tokens before Markdown conversion, then restore them as `$...$` or `$$...$$`.
-5. Never invent TeX when the served page has already discarded the original expression; unrecovered formulas remain visible in rendered form and are recorded in `formulas.json`.
+5. Never invent TeX when the served page has already discarded the original expression; unrecovered formulas remain in the rendered article DOM, are converted by the normal Markdown path as best-effort visible text, and are recorded in `formulas.json`.
 6. Export content SVG diagrams to standalone `.svg` files while removing decorative/`aria-hidden` SVG icons.
 7. Download normal article images into `assets/images/` and rewrite their paths locally.
 8. Normalize article links to absolute URLs.
@@ -42,7 +42,7 @@ The current Action has been tested against the target page with Crawl4AI 0.9.3 a
 
 For this page, both the HTTP source and the Chromium-rendered DOM already contain KaTeX's visual HTML spans but no `application/x-tex` annotation, MathML source, TeX data attribute, or original `$$...$$` / `\(...\)` / `\[...\]` delimiter text. That means the original TeX expression is no longer present in the served page.
 
-The crawler therefore intentionally does **not** guess a replacement LaTeX expression. It preserves the rendered formula information and records the recovery status. Exact TeX recovery for such pages requires access to the original Markdown/content source or another authoritative source containing the TeX.
+The crawler therefore intentionally does **not** guess a replacement LaTeX expression. It keeps the available rendered representation and records the recovery status. Exact TeX recovery for such pages requires access to the original Markdown/content source or another authoritative source containing the TeX.
 
 ## What the action exports
 
