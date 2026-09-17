@@ -1,0 +1,248 @@
+name: Sharded csgraduates archive
+
+on:
+  push:
+    branches:
+      - run/csgraduates-full-archive
+    paths:
+      - requirements.txt
+      - scripts/crawl_test.py
+      - scripts/crawl_site.py
+      - scripts/crawl_site_static.py
+      - scripts/crawl_site_shard.py
+      - scripts/shard_plan.py
+      - scripts/merge_shards.py
+      - scripts/build_navigation.py
+      - tests/**
+      - .github/workflows/csgraduates-sharded-archive.yml
+  workflow_dispatch:
+    inputs:
+      chunk_size:
+        description: Maximum pages per shard
+        required: true
+        default: "35"
+
+concurrency:
+  group: csgraduates-full-archive
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: Plan archive shards
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      url_count: ${{ steps.plan.outputs.url_count }}
+      shard_count: ${{ steps.plan.outputs.shard_count }}
+    env:
+      CHUNK_SIZE: ${{ github.event_name == 'workflow_dispatch' && inputs.chunk_size || '35' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Build shard matrix from sitemap
+        id: plan
+        run: |
+          mkdir -p artifacts
+          python scripts/shard_plan.py \
+            --base-url "https://csgraduates.com/" \
+            --chunk-size "$CHUNK_SIZE" \
+            --output artifacts/shard-plan.json \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Upload shard plan
+        uses: actions/upload-artifact@v7
+        with:
+          name: csgraduates-shard-plan-${{ github.run_id }}
+          path: artifacts/shard-plan.json
+          retention-days: 14
+
+  test:
+    name: Run archive tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+
+  archive:
+    name: ${{ matrix.label }} · ${{ matrix.count }} pages
+    needs:
+      - prepare
+      - test
+    if: ${{ needs.prepare.result == 'success' && needs.test.result == 'success' }}
+    strategy:
+      fail-fast: false
+      max-parallel: 12
+      matrix:
+        include: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      SHARD_ID: ${{ matrix.id }}
+      SHARD_LABEL: ${{ matrix.label }}
+      SHARD_URLS_B64: ${{ matrix.urls_b64 }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies and Chromium
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Archive shard with live progress
+        run: |
+          python scripts/crawl_site_shard.py \
+            --base-url "https://csgraduates.com/" \
+            --urls-b64 "$SHARD_URLS_B64" \
+            --shard-name "$SHARD_LABEL" \
+            --output-dir artifacts/site \
+            --article-selector .td-content \
+            --fetch-concurrency 12 \
+            --process-concurrency 8 \
+            --pdf-concurrency 4 \
+            --asset-wait-ms 8000
+
+      - name: Package shard ZIP
+        run: |
+          python - <<'PY'
+          import os
+          import shutil
+          shard_id = os.environ["SHARD_ID"]
+          shutil.make_archive(
+              f"artifacts/shard-{shard_id}",
+              "zip",
+              root_dir="artifacts",
+              base_dir="site",
+          )
+          PY
+
+      - name: Add shard summary
+        if: always()
+        run: |
+          echo "## $SHARD_LABEL" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f artifacts/site/summary.json ]; then
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            cat artifacts/site/summary.json >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload shard archive
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: csgraduates-shard-${{ matrix.id }}-${{ github.run_id }}
+          path: artifacts/shard-${{ matrix.id }}.zip
+          if-no-files-found: warn
+          retention-days: 7
+          compression-level: 0
+
+  merge:
+    name: Merge complete archive
+    needs:
+      - prepare
+      - archive
+    if: ${{ always() && needs.prepare.result == 'success' && needs.archive.result != 'cancelled' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Download all shard ZIPs
+        uses: actions/download-artifact@v7
+        with:
+          pattern: csgraduates-shard-*-${{ github.run_id }}
+          path: artifacts/shards
+          merge-multiple: true
+
+      - name: Merge shard outputs
+        run: |
+          python scripts/merge_shards.py \
+            --shards-dir artifacts/shards \
+            --output-dir artifacts/site
+
+      - name: Rebuild real sidebar navigation
+        run: |
+          python scripts/build_navigation.py \
+            --archive-root artifacts/site \
+            --base-url "https://csgraduates.com/"
+
+      - name: Package complete Windows-compatible ZIP
+        run: |
+          python - <<'PY'
+          import shutil
+          shutil.make_archive(
+              "artifacts/csgraduates-site-archive",
+              "zip",
+              root_dir="artifacts",
+              base_dir="site",
+          )
+          PY
+
+      - name: Add final summary
+        if: always()
+        run: |
+          echo "## Complete csgraduates archive" >> "$GITHUB_STEP_SUMMARY"
+          echo "Discovered URLs: ${{ needs.prepare.outputs.url_count }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Archive shards: ${{ needs.prepare.outputs.shard_count }}" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f artifacts/site/summary.json ]; then
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            cat artifacts/site/summary.json >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload complete archive ZIP
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: csgraduates-complete-sharded-${{ github.run_id }}
+          path: artifacts/csgraduates-site-archive.zip
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 0
