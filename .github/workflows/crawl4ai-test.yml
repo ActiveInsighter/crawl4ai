@@ -7,12 +7,17 @@ on:
         description: URL to crawl
         required: true
         default: https://csgraduates.com/constitution_principle/instruction/concepts/
+      article_selector:
+        description: Optional CSS selector for the article root
+        required: false
+        default: .td-content
   push:
     branches:
       - feat/crawl4ai-csgraduates-test
     paths:
       - requirements.txt
       - scripts/crawl_test.py
+      - tests/**
       - .github/workflows/crawl4ai-test.yml
 
 permissions:
@@ -41,18 +46,38 @@ jobs:
           pip install -r requirements.txt
           python -m playwright install --with-deps chromium
 
+      - name: Run post-processing tests
+        run: python -m unittest discover -s tests -v
+
       - name: Crawl target page
         env:
           TARGET_URL: ${{ inputs.url || 'https://csgraduates.com/constitution_principle/instruction/concepts/' }}
+          ARTICLE_SELECTOR: ${{ inputs.article_selector || '.td-content' }}
         run: |
-          python scripts/crawl_test.py --url "$TARGET_URL" --output-dir artifacts/crawl
+          python scripts/crawl_test.py \
+            --url "$TARGET_URL" \
+            --article-selector "$ARTICLE_SELECTOR" \
+            --output-dir artifacts/crawl
+
+      - name: Package Windows-compatible ZIP
+        shell: bash
+        run: |
+          python - <<'PY'
+          import shutil
+          shutil.make_archive(
+              "artifacts/crawl4ai-csgraduates-result",
+              "zip",
+              root_dir="artifacts",
+              base_dir="crawl",
+          )
+          PY
 
       - name: Add crawl summary
         if: always()
         shell: bash
         run: |
           if [ -f artifacts/crawl/metadata.json ]; then
-            echo '## Crawl4AI result' >> "$GITHUB_STEP_SUMMARY"
+            echo '## Crawl4AI high-fidelity result' >> "$GITHUB_STEP_SUMMARY"
             echo '```json' >> "$GITHUB_STEP_SUMMARY"
             cat artifacts/crawl/metadata.json >> "$GITHUB_STEP_SUMMARY"
             echo '```' >> "$GITHUB_STEP_SUMMARY"
@@ -63,6 +88,8 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: crawl4ai-csgraduates-result
-          path: artifacts/crawl/
+          path: |
+            artifacts/crawl/
+            artifacts/crawl4ai-csgraduates-result.zip
           if-no-files-found: warn
           retention-days: 14
