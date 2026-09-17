@@ -1,0 +1,114 @@
+name: Crawl4AI parse test
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: URL to crawl
+        required: true
+        default: https://csgraduates.com/constitution_principle/instruction/concepts/
+      article_selector:
+        description: Optional CSS selector for the article root
+        required: false
+        default: .td-content
+  push:
+    branches:
+      - feat/crawl4ai-csgraduates-test
+    paths:
+      - requirements.txt
+      - scripts/crawl_test.py
+      - scripts/export_rendered.py
+      - tests/**
+      - .github/workflows/crawl4ai-test.yml
+
+permissions:
+  contents: read
+
+jobs:
+  crawl:
+    name: Crawl and export page
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install Crawl4AI
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Run post-processing tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Crawl target page
+        env:
+          TARGET_URL: ${{ inputs.url || 'https://csgraduates.com/constitution_principle/instruction/concepts/' }}
+          ARTICLE_SELECTOR: ${{ inputs.article_selector || '.td-content' }}
+        run: |
+          python scripts/crawl_test.py \
+            --url "$TARGET_URL" \
+            --article-selector "$ARTICLE_SELECTOR" \
+            --output-dir artifacts/crawl
+
+      - name: Capture live rendered HTML and print PDF
+        env:
+          TARGET_URL: ${{ inputs.url || 'https://csgraduates.com/constitution_principle/instruction/concepts/' }}
+        run: |
+          python scripts/export_rendered.py \
+            --input artifacts/crawl/rendered.html \
+            --base-url "$TARGET_URL" \
+            --output-replay-html artifacts/crawl/rendered-standalone.html \
+            --output-live-html artifacts/crawl/browser-rendered.html \
+            --output-pdf artifacts/crawl/browser-rendered.pdf \
+            --metadata artifacts/crawl/rendered-export.json
+
+      - name: Package Windows-compatible ZIP
+        shell: bash
+        run: |
+          python - <<'PY'
+          import shutil
+          shutil.make_archive(
+              "artifacts/crawl4ai-csgraduates-result",
+              "zip",
+              root_dir="artifacts",
+              base_dir="crawl",
+          )
+          PY
+
+      - name: Add crawl summary
+        if: always()
+        shell: bash
+        run: |
+          if [ -f artifacts/crawl/metadata.json ]; then
+            echo '## Crawl4AI high-fidelity result' >> "$GITHUB_STEP_SUMMARY"
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            cat artifacts/crawl/metadata.json >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -f artifacts/crawl/rendered-export.json ]; then
+            echo '## Live browser HTML / PDF' >> "$GITHUB_STEP_SUMMARY"
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            cat artifacts/crawl/rendered-export.json >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload crawl artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: crawl4ai-csgraduates-result
+          path: |
+            artifacts/crawl/
+            artifacts/crawl4ai-csgraduates-result.zip
+          if-no-files-found: warn
+          retention-days: 14
