@@ -15,19 +15,18 @@ on:
         description: Maximum pages to inspect only when sitemap discovery is unavailable
         required: true
         default: "5000"
-      crawl_concurrency:
-        description: Crawl4AI concurrent browser sessions
+      fetch_concurrency:
+        description: Concurrent static HTML fetches
         required: true
-        default: "3"
+        default: "12"
+      process_concurrency:
+        description: Concurrent Markdown/resource postprocessors
+        required: true
+        default: "8"
       pdf_concurrency:
         description: Concurrent Chromium PDF exports
         required: true
-        default: "2"
-      fetch_source_html:
-        description: Also fetch and save pre-render HTTP source for TeX recovery
-        required: false
-        type: boolean
-        default: false
+        default: "4"
       skip_pdf:
         description: Skip browser-rendered HTML/PDF export
         required: false
@@ -41,6 +40,7 @@ on:
       - scripts/crawl_test.py
       - scripts/crawl_site.py
       - scripts/crawl_site_fast.py
+      - scripts/crawl_site_static.py
       - scripts/site_discovery.py
       - scripts/build_navigation.py
       - tests/**
@@ -62,9 +62,9 @@ jobs:
       BASE_URL: ${{ inputs.base_url || 'https://csgraduates.com/' }}
       MAX_PAGES: ${{ github.event_name == 'workflow_dispatch' && inputs.max_pages || '3' }}
       DISCOVERY_LIMIT: ${{ github.event_name == 'workflow_dispatch' && inputs.discovery_limit || '20' }}
-      CRAWL_CONCURRENCY: ${{ inputs.crawl_concurrency || '3' }}
-      PDF_CONCURRENCY: ${{ inputs.pdf_concurrency || '2' }}
-      FETCH_SOURCE_HTML: ${{ inputs.fetch_source_html || 'false' }}
+      FETCH_CONCURRENCY: ${{ inputs.fetch_concurrency || '12' }}
+      PROCESS_CONCURRENCY: ${{ inputs.process_concurrency || '8' }}
+      PDF_CONCURRENCY: ${{ inputs.pdf_concurrency || '4' }}
       SKIP_PDF: ${{ inputs.skip_pdf || 'false' }}
 
     steps:
@@ -91,20 +91,18 @@ jobs:
         shell: bash
         run: |
           extra_args=()
-          if [[ "$FETCH_SOURCE_HTML" == "true" ]]; then
-            extra_args+=(--fetch-source-html)
-          fi
           if [[ "$SKIP_PDF" == "true" ]]; then
             extra_args+=(--skip-pdf)
           fi
 
-          python scripts/crawl_site_fast.py \
+          python scripts/crawl_site_static.py \
             --base-url "$BASE_URL" \
             --output-dir artifacts/site \
             --article-selector .td-content \
             --max-pages "$MAX_PAGES" \
             --discovery-limit "$DISCOVERY_LIMIT" \
-            --crawl-concurrency "$CRAWL_CONCURRENCY" \
+            --fetch-concurrency "$FETCH_CONCURRENCY" \
+            --process-concurrency "$PROCESS_CONCURRENCY" \
             --pdf-concurrency "$PDF_CONCURRENCY" \
             "${extra_args[@]}"
 
