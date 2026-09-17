@@ -10,7 +10,7 @@ on:
 
 concurrency:
   group: csgraduates-full-archive
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -43,14 +43,16 @@ jobs:
 
       - name: Archive all csgraduates documents
         run: |
-          python scripts/crawl_site_fast.py \
+          python scripts/crawl_site_static.py \
             --base-url "https://csgraduates.com/" \
             --output-dir artifacts/site \
             --article-selector .td-content \
             --max-pages 0 \
             --discovery-limit 5000 \
-            --crawl-concurrency 3 \
-            --pdf-concurrency 2
+            --fetch-concurrency 12 \
+            --process-concurrency 8 \
+            --pdf-concurrency 4 \
+            --asset-wait-ms 8000
 
       - name: Export real sidebar navigation
         run: |
