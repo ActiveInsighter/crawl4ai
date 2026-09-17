@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CacheMode, CrawlerRunConfig
+from crawl4ai.content_filter_strategy import PruningContentFilter
+from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
 
 DEFAULT_URL = "https://csgraduates.com/constitution_principle/instruction/concepts/"
 
@@ -40,11 +42,22 @@ async def crawl(url: str, output_dir: Path) -> None:
         headless=True,
         verbose=False,
     )
+
+    markdown_generator = DefaultMarkdownGenerator(
+        content_filter=PruningContentFilter(
+            threshold=0.48,
+            threshold_type="fixed",
+            min_word_threshold=0,
+        ),
+        options={"ignore_links": False},
+    )
+
     run_config = CrawlerRunConfig(
         cache_mode=CacheMode.BYPASS,
         page_timeout=120_000,
         remove_overlay_elements=True,
         excluded_tags=["nav", "footer"],
+        markdown_generator=markdown_generator,
     )
 
     async with AsyncWebCrawler(config=browser_config) as crawler:
