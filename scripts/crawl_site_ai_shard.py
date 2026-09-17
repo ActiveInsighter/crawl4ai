@@ -57,7 +57,7 @@ async def archive(args: argparse.Namespace) -> None:
         marker = "✓" if record.get("success") else "✗"
         print(
             f"[PAGE {counters['done']:03d}/{total:03d}] {marker} "
-            f"{record.get('elapsed_seconds', '-') }s {url}",
+            f"{record.get('elapsed_seconds', '-')}s {url}",
             flush=True,
         )
         if record.get("success"):
