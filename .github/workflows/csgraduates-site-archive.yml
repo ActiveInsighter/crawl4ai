@@ -43,6 +43,10 @@ on:
       - tests/**
       - .github/workflows/csgraduates-site-archive.yml
 
+concurrency:
+  group: csgraduates-site-archive-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
