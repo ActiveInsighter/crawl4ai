@@ -11,6 +11,10 @@ on:
         description: Maximum pages to archive; 0 means all discovered pages
         required: true
         default: "0"
+      discovery_limit:
+        description: Maximum pages to inspect only when sitemap discovery is unavailable
+        required: true
+        default: "5000"
       crawl_concurrency:
         description: Crawl4AI concurrent browser sessions
         required: true
@@ -50,6 +54,7 @@ jobs:
     env:
       BASE_URL: ${{ inputs.base_url || 'https://csgraduates.com/' }}
       MAX_PAGES: ${{ github.event_name == 'workflow_dispatch' && inputs.max_pages || '3' }}
+      DISCOVERY_LIMIT: ${{ github.event_name == 'workflow_dispatch' && inputs.discovery_limit || '20' }}
       CRAWL_CONCURRENCY: ${{ inputs.crawl_concurrency || '3' }}
       PDF_CONCURRENCY: ${{ inputs.pdf_concurrency || '2' }}
       FETCH_SOURCE_HTML: ${{ inputs.fetch_source_html || 'false' }}
@@ -91,6 +96,7 @@ jobs:
             --output-dir artifacts/site \
             --article-selector .td-content \
             --max-pages "$MAX_PAGES" \
+            --discovery-limit "$DISCOVERY_LIMIT" \
             --crawl-concurrency "$CRAWL_CONCURRENCY" \
             --pdf-concurrency "$PDF_CONCURRENCY" \
             "${extra_args[@]}"
