@@ -20,6 +20,10 @@ on:
         description: Maximum pages per large study-resource shard
         required: true
         default: "35"
+      target_urls:
+        description: Comma-separated URLs to archive
+        required: true
+        default: "https://www.csgraduates.com/data_structure/search/,https://www.csgraduates.com/data_structure/search/array/,https://www.csgraduates.com/data_structure/search/tree/,https://www.csgraduates.com/data_structure/search/hash/"
 
 concurrency:
   group: csgraduates-full-archive
@@ -39,6 +43,7 @@ jobs:
       shard_count: ${{ steps.plan.outputs.shard_count }}
     env:
       CHUNK_SIZE: ${{ github.event_name == 'workflow_dispatch' && inputs.chunk_size || '35' }}
+      TARGET_URLS: ${{ github.event_name == 'workflow_dispatch' && inputs.target_urls || 'https://www.csgraduates.com/data_structure/search/,https://www.csgraduates.com/data_structure/search/array/,https://www.csgraduates.com/data_structure/search/tree/,https://www.csgraduates.com/data_structure/search/hash/' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -48,16 +53,45 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Build balanced matrix from sitemap
+      - name: Build fixed matrix from target URLs
         id: plan
         run: |
           mkdir -p artifacts
-          python scripts/shard_plan_balanced.py \
-            --base-url "https://csgraduates.com/" \
-            --chunk-size "$CHUNK_SIZE" \
-            --tiny-study-threshold 4 \
-            --output artifacts/shard-plan.json \
-            --github-output "$GITHUB_OUTPUT"
+          python - <<'PY'
+          import base64
+          import json
+          import os
+
+          urls = [url.strip() for url in os.environ["TARGET_URLS"].split(",") if url.strip()]
+          if not urls:
+              raise SystemExit("TARGET_URLS is empty")
+
+          urls_b64 = base64.urlsafe_b64encode(
+              json.dumps(urls, ensure_ascii=False).encode("utf-8")
+          ).decode("ascii")
+          shards = [{
+              "id": "data-structure-search",
+              "label": "数据结构·查找",
+              "count": len(urls),
+              "urls_b64": urls_b64,
+              "group": "data_structure/search",
+          }]
+          plan = {
+              "base_url": "https://www.csgraduates.com/data_structure/search/",
+              "url_count": len(urls),
+              "shard_count": 1,
+              "chunk_size": len(urls),
+              "tiny_study_threshold": 0,
+              "shards": shards,
+          }
+          with open("artifacts/shard-plan.json", "w", encoding="utf-8") as handle:
+              json.dump(plan, handle, ensure_ascii=False, indent=2)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write("matrix=" + json.dumps(shards, ensure_ascii=False, separators=(",", ":")) + "\n")
+              handle.write(f"url_count={len(urls)}\n")
+              handle.write("shard_count=1\n")
+          print(json.dumps({"url_count": len(urls), "shard_count": 1}, ensure_ascii=False))
+          PY
 
       - name: Upload shard plan
         uses: actions/upload-artifact@v7
