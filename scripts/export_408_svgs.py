@@ -40,7 +40,16 @@ EXTRACT_JS = r"""
     if (ariaHidden === "true" || role === "none" || role === "presentation" || cls.has("kp-icon")) {
       continue;
     }
-    const xml = new XMLSerializer().serializeToString(node);
+    const clone = node.cloneNode(true);
+    const all = [clone, ...clone.querySelectorAll("*")];
+    const validXmlName = /^[A-Za-z_][A-Za-z0-9_.:-]*$/;
+    for (const el of all) {
+      for (const attr of [...el.attributes]) {
+        if (!validXmlName.test(attr.name)) el.removeAttribute(attr.name);
+      }
+    }
+    if (!clone.getAttribute("xmlns")) clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+    const xml = new XMLSerializer().serializeToString(clone);
     out.push({
       question,
       xml,
