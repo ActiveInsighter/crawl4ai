@@ -42,7 +42,7 @@ EXTRACT_JS = r"""
     }
     const clone = node.cloneNode(true);
     const all = [clone, ...clone.querySelectorAll("*")];
-    const validXmlName = /^[A-Za-z_][A-Za-z0-9_.:-]*$/;
+    const validXmlName = /^[A-Za-z_][A-Za-z0-9_.-]*(?::[A-Za-z_][A-Za-z0-9_.-]*)?$/;
     for (const el of all) {
       for (const attr of [...el.attributes]) {
         if (!validXmlName.test(attr.name)) el.removeAttribute(attr.name);
