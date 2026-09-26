@@ -65,7 +65,13 @@ EXTRACT_JS = r"""
 def validate_svg(xml: str) -> ET.Element:
     if "<!DOCTYPE" in xml.upper():
         raise ValueError("DOCTYPE is not allowed")
-    root = ET.fromstring(xml)
+    try:
+        root = ET.fromstring(xml)
+    except ET.ParseError as exc:
+        col = exc.position[1] if getattr(exc, "position", None) else 0
+        lo, hi = max(0, col - 180), min(len(xml), col + 180)
+        print("[svg-xml-error]", repr(xml[lo:hi]))
+        raise
     local = root.tag.rsplit("}", 1)[-1]
     if local != "svg":
         raise ValueError(f"root element is {root.tag!r}, expected svg")
