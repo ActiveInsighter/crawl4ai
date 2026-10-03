@@ -2,6 +2,20 @@
 
 ## Complete 408 MDX archive
 
+Long-answer questions can also be packaged separately into the four 408 subjects:
+
+```bash
+python scripts/organize_408_long_answers.py \
+  --source artifacts/408-mdx \
+  --output artifacts/408-long-answers-by-subject \
+  --zip artifacts/408-long-answers-by-subject.zip
+```
+
+Use new output and ZIP paths. Each question has its own MDX and local images,
+named with the subject sequence, year, and original question number. Classification
+uses the source subject headings, including the reordered papers in 2014, 2016,
+and 2019. The workflow publishes both the complete archive and this 126-question package.
+
 `scripts/export_408_mdx.py` discovers every annual 408 paper from the source index
 (currently 2009–2026). It exports one MDX per year, complete questions/options/
 answers/explanations, standalone XML-valid top-level SVG diagrams, original bitmap

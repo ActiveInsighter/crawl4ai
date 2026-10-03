@@ -7,7 +7,9 @@ on:
       - scripts/quiz_*.py
       - scripts/export_408_mdx.py
       - scripts/validate_408_mdx.mjs
+      - scripts/organize_408_long_answers.py
       - tests/test_408_mdx.py
+      - tests/test_408_long_answers.py
       - requirements-mdx.txt
       - package*.json
       - .github/workflows/export-408-mdx.yml
@@ -37,7 +39,7 @@ jobs:
           python -m playwright install --with-deps chromium
           npm ci --ignore-scripts
       - name: Test content and SVG conversion
-        run: python -m unittest tests.test_408_mdx tests.test_ai_archive -v
+        run: python -m unittest tests.test_408_mdx tests.test_408_long_answers tests.test_ai_archive -v
       - name: Crawl, validate MDX and package every year
         run: python scripts/export_408_mdx.py --output-dir artifacts/408-mdx
       - name: Upload complete package
@@ -45,6 +47,20 @@ jobs:
         with:
           name: 408-complete-mdx-${{ github.run_id }}
           path: artifacts/408-mdx.zip
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+      - name: Organize long-answer questions by subject
+        run: >-
+          python scripts/organize_408_long_answers.py
+          --source artifacts/408-mdx
+          --output artifacts/408-long-answers-by-subject
+          --zip artifacts/408-long-answers-by-subject.zip
+      - name: Upload subject-based long-answer package
+        uses: actions/upload-artifact@v7
+        with:
+          name: 408-long-answers-${{ github.run_id }}
+          path: artifacts/408-long-answers-by-subject.zip
           if-no-files-found: error
           retention-days: 90
           compression-level: 0
