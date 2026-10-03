@@ -1,5 +1,35 @@
 # crawl4ai test harness
 
+## Complete 408 MDX archive
+
+`scripts/export_408_mdx.py` discovers every annual 408 paper from the source index
+(currently 2009–2026). It exports one MDX per year, complete questions/options/
+answers/explanations, standalone XML-valid top-level SVG diagrams, original bitmap
+images, and self-contained formula SVGs with embedded KaTeX fonts. Nested drawing
+components stay inside their parent figure; formula brackets are not treated as diagrams.
+
+```bash
+pip install -r requirements-mdx.txt
+python -m playwright install --with-deps chromium
+npm ci --ignore-scripts
+python -m unittest tests.test_408_mdx tests.test_ai_archive -v
+python scripts/export_408_mdx.py --output-dir artifacts/408-mdx --resume
+```
+
+The script rejects missing question numbers, misplaced/missing answers, missing
+options or solutions, malformed SVGs, missing local assets, and MDX compilation
+errors before creating `artifacts/408-mdx.zip`. `--resume` revalidates completed
+years before skipping them. The dedicated `export-408-mdx.yml` Action runs the
+same pipeline and retains the ZIP for 90 days.
+
+Files: `YEAR.mdx`, `index.mdx`, `meta.json`, `assets/figures/`, `assets/formulas/`,
+`assets/images/`, `sources/`, `manifest.json`, and `mdx-validation.json`.
+Images use relative `<img src="./assets/...svg" alt="..." />` references.
+Use `remark-gfm` and `remark-frontmatter` when compiling. If a website framework
+does not serve colocated assets, copy them into its public directory and rewrite
+the image prefix for that website. Formula SVGs preserve browser typography with
+`foreignObject`; they require a modern browser and do not claim reconstructed TeX.
+
 A GitHub Actions test harness for evaluating [Crawl4AI](https://github.com/unclecode/crawl4ai) against documentation pages while preserving formulas, images and inline SVG diagrams for downstream AI/document workflows.
 
 ## Current target

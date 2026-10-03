@@ -1,0 +1,2 @@
+-r requirements-ai.txt
+playwright>=1.55,<2
