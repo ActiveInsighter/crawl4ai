@@ -48,7 +48,7 @@ class PdfOnlyTests(unittest.TestCase):
             page.insert_text((60, 60), "CPU cache instruction memory", fontsize=12)
             doc.save(path)
             doc.close()
-            info = inspect_pdf(path, 200)
+            info = inspect_pdf(path, 100)
             self.assertEqual(info["pdf_pages"], 1)
             self.assertEqual(len(info["sha256"]), 64)
             self.assertGreater(info["pdf_text_chars"], 10)
