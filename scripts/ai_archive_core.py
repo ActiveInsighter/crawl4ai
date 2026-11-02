@@ -340,8 +340,15 @@ async def inline_svg_images(article: Tag, base_url: str) -> list[dict[str, str]]
 def export_inline_svgs(article: Tag, output_dir: Path) -> tuple[list[dict[str, Any]], int]:
     manifest: list[dict[str, Any]] = []
     skipped = 0
+    svg_dir = output_dir / "assets" / "svg"
+    preexisting_count = len(list(svg_dir.glob("figure-*.svg"))) if svg_dir.is_dir() else 0
     for svg in list(article.find_all("svg")):
         if svg.parent is None:
+            continue
+        # Browser screenshots and MathJax formulas are handled by the formula
+        # pipeline, not by inline-diagram export. Nested SVGs belong to
+        # their parent diagram and must not become independent figures.
+        if svg.find_parent("mjx-container") or svg.find_parent(class_="katex") or svg.find_parent("svg"):
             continue
         if _is_decorative_svg(svg):
             skipped += 1
@@ -349,8 +356,7 @@ def export_inline_svgs(article: Tag, output_dir: Path) -> tuple[list[dict[str, A
             continue
         preview = text_value(svg.attrs.pop("data-archive-svg-preview", "")).strip()
         serialized_source = text_value(svg.attrs.pop("data-archive-svg-serialized", "")).strip()
-        index = len(manifest) + 1
-        svg_dir = output_dir / "assets" / "svg"
+        index = preexisting_count + len(manifest) + 1
         svg_dir.mkdir(parents=True, exist_ok=True)
         path = svg_dir / f"figure-{index:03d}.svg"
         if serialized_source and serialized_source.startswith("assets/svg/") and ".." not in serialized_source:
@@ -538,6 +544,22 @@ async def process_page(url: str, archive_root: Path, article_selector: str = ".t
     normalize_links(article, resolved)
     svg_dependency_failures = await inline_svg_images(article, resolved)
     svgs, skipped_svgs = export_inline_svgs(article, page_dir)
+    # Browser already wrote validated XML and PNG previews to the page folder.
+    # The annotated DOM now holds <img src="assets/svg/figure-N.svg"> to
+    # prevent HTML parsers from corrupting XHTML foreignObject markup.
+    known_svg_paths = {item["path"] for item in svgs}
+    for source in sorted((page_dir / "assets" / "svg").glob("figure-*.svg")):
+        relative = source.relative_to(page_dir).as_posix()
+        if relative not in known_svg_paths:
+            preview_path = "assets/svg-previews/" + source.stem + ".png"
+            preview = page_dir / preview_path
+            svgs.append({
+                "path": relative,
+                "bytes": source.stat().st_size,
+                "preview": preview_path if preview.is_file() else "",
+                "source": "browser_serialized",
+            })
+            known_svg_paths.add(relative)
     image_count, image_failures = await localize_images(article, resolved, page_dir)
 
     # Keep formula DOM intact in HTML so an AI can recover visual formula text.

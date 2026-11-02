@@ -4,6 +4,7 @@ on:
     branches:
       - codex/408-knowledge-fidelity-20261102
       - codex/408-fix-live-capture-20261102
+      - codex/408-article-container-fix-20261102
   pull_request:
     paths:
       - 'scripts/ai_archive_core.py'
@@ -49,6 +50,12 @@ jobs:
               "https://csgraduates.com/constitution_principle/instruction/concepts/",
               "https://csgraduates.com/data_structure/tree/btree/",
               "https://csgraduates.com/data_structure/",
+              "https://csgraduates.com/",
+              "https://csgraduates.com/computer_network/transport/tcp/",
+              "https://csgraduates.com/data_structure/graph/defs/",
+              "https://csgraduates.com/operating_system/memory/management/",
+              "https://csgraduates.com/computer_network/network/ip/",
+              "https://csgraduates.com/constitution_principle/storage/cache/",
               "https://csgraduates.com/study_methods/english/english2/2025/",
           ]
           payload = base64.urlsafe_b64encode(json.dumps(pages).encode()).decode()
@@ -75,8 +82,20 @@ jobs:
           import json
           data = json.load(open("artifacts/verified/quality-report.json"))
           print(json.dumps(data, ensure_ascii=False, indent=2))
-          if data["page_count"] != 4:
-              raise SystemExit("Smoke test must contain both expected pages")
+          if data["page_count"] != 10:
+              raise SystemExit("Smoke test must contain ten expected pages")
+          records = json.load(open("artifacts/site/shard-manifest.json"))["pages"]
+          incomplete = [
+              {"url": rec.get("url"), "error": rec.get("error"), "issues": rec.get("quality_issues")}
+              for rec in records
+              if (not rec.get("success") or not rec.get("browser_rendered") or
+                  (rec.get("math") or {}).get("unresolved", 0) > 0 or
+                  "missing_svg_visual_preview" in rec.get("quality_issues", []) or
+                  "svg_capture_failed" in rec.get("quality_issues", []))
+          ]
+          if incomplete:
+              raise SystemExit("Real-world fidelity test found incomplete pages: " +
+                               json.dumps(incomplete, ensure_ascii=False))
           PY
       - name: Upload real-world fidelity sample
         if: always()

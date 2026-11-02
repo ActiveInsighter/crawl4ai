@@ -71,6 +71,26 @@ class AiArchiveTests(unittest.TestCase):
             self.assertIsNotNone(image)
             self.assertEqual(image.get("src"), "assets/svg/figure-001.svg")
 
+    def test_browser_svg_assets_are_not_overwritten_by_secondary_export(self):
+        from xml.etree import ElementTree as ET
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            folder = root / "assets" / "svg"
+            folder.mkdir(parents=True)
+            browser_xml = '<svg xmlns="http://www.w3.org/2000/svg"><text>source vector</text></svg>'
+            (folder / "figure-001.svg").write_text(browser_xml, encoding="utf-8")
+            soup = BeautifulSoup(
+                '<div class="td-content">'
+                '<img src="assets/svg/figure-001.svg" alt="browser diagram"/>'
+                '<svg viewBox="0 0 10 10"><rect width="10" height="10"/></svg>'
+                '</div>', "html.parser"
+            )
+            exported, skipped = export_inline_svgs(soup.select_one(".td-content"), root)
+            self.assertEqual(skipped, 0)
+            self.assertEqual(exported[0]["path"], "assets/svg/figure-002.svg")
+            self.assertEqual((folder / "figure-001.svg").read_text(encoding="utf-8"), browser_xml)
+            ET.parse(folder / "figure-002.svg")
+
     def test_formula_source_order_is_never_assumed(self):
         from scripts.ai_archive_core import replace_math_with_tokens
         soup = BeautifulSoup('<div class="td-content"><span class="katex"><span class="katex-html">unknown</span></span></div>', "html.parser")

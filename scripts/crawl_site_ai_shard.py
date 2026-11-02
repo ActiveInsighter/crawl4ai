@@ -112,6 +112,7 @@ async def capture_unrecoverable_math(page, page_dir: Path) -> tuple[int, list[di
         );
         const seen = new Set();
         const ids = [];
+        let nextId = Number(document.body.getAttribute('data-archive-next-formula-id') || 1);
         for (const node of candidates) {
             if (node.tagName.toLowerCase() === 'math' &&
                 (node.closest('.katex') || node.closest('mjx-container'))) continue;
@@ -127,12 +128,13 @@ async def capture_unrecoverable_math(page, page_dir: Path) -> tuple[int, list[di
                     if (element.querySelector('script[type^="math/tex"]')) known = true;
                 }
             }
-            if (!known) {
-                const id = String(ids.length + 1).padStart(4, '0');
+            if (!known && !target.getAttribute('data-archive-formula-image')) {
+                const id = String(nextId++).padStart(4, '0');
                 target.setAttribute('data-archive-formula-shot-id', id);
                 ids.push(id);
             }
         }
+        document.body.setAttribute('data-archive-next-formula-id', String(nextId));
         return ids;
     }""")
     failures = []
@@ -195,16 +197,19 @@ async def capture_svg_previews(page, page_dir: Path) -> tuple[int, list[dict], l
     ids = await page.evaluate(r"""() => {
         const nodes = document.querySelectorAll('.td-content svg');
         const ids = [];
+        let nextId = Number(document.body.getAttribute('data-archive-next-svg-id') || 1);
         for (const svg of nodes) {
             if (svg.closest('.katex') || svg.closest('mjx-container')) continue;
             if (svg.parentElement?.closest('svg')) continue;
             if (svg.getAttribute('aria-hidden') === 'true') continue;
             if (['presentation', 'none'].includes(svg.getAttribute('role'))) continue;
             if (svg.classList.contains('kp-icon')) continue;
-            const id = String(ids.length + 1).padStart(3, '0');
+            if (svg.hasAttribute('data-archive-svg-serialized')) continue;
+            const id = String(nextId++).padStart(3, '0');
             svg.setAttribute('data-archive-svg-shot-id', id);
             ids.push(id);
         }
+        document.body.setAttribute('data-archive-next-svg-id', String(nextId));
         return ids;
     }""")
     previews, failures, xml_assets = 0, [], []
@@ -347,22 +352,107 @@ async def render_pages(
                             response = await page.goto(url, wait_until="commit", timeout=min(timeout_ms, 45_000))
                             if response is None or response.status >= 400:
                                 raise RuntimeError(f"HTTP {response.status if response else 'no response'}")
-                            await page.wait_for_selector(".td-content", state="attached", timeout=20_000)
-                            await page.wait_for_function(
-                                "() => document.readyState !== 'loading'", timeout=15_000,
+                            # Category indexes and home pages may have no Docsy .td-content.
+                            # A browser-rendered page need not contain that exact selector.
+                            is_core = urlsplit(url).path.strip("/").split("/", 1)[0] in {
+                                "data_structure", "constitution_principle",
+                                "operating_system", "computer_network",
+                            }
+                            await page.wait_for_selector(
+                                ".td-content" if is_core else
+                                ".td-content, main article, article, [role='main'], main, body",
+                                state="attached", timeout=25_000,
                             )
+                            domcontentloaded = True
+                            if is_core:
+                                try:
+                                    # Core knowledge chapters should be parsed to
+                                    # the end before snapshot. The early .td-content
+                                    # and a 1s text plateau are insufficient on
+                                    # slowly streamed pages (IP, Cache).
+                                    await page.wait_for_load_state(
+                                        "domcontentloaded", timeout=28_000,
+                                    )
+                                except PlaywrightTimeoutError:
+                                    domcontentloaded = False
+                                    print("[RENDER WARN] DOMContentLoaded timeout: " + url, flush=True)
+                            # ReadyState can remain 'loading' for a long time due
+                            # to unrelated web resources. Instead require actual
+                            # content *and* a stable article-text length for 1s.
+                            # This prevents capturing the navbar before the
+                            # knowledge chapter has been parsed by Chromium.
+                            await page.wait_for_function(r"""(isCore) => {
+                                const node = isCore
+                                    ? document.querySelector('.td-content')
+                                    : (document.querySelector('.td-content, main article, article, [role="main"], main') ||
+                                       document.body);
+                                const chars = (node?.innerText || node?.textContent || '').trim().length;
+                                if (chars < (isCore ? 80 : 20)) return false;
+                                const now = Date.now();
+                                const stamp = window.__c4a_text_stability;
+                                if (!stamp || stamp.length !== chars) {
+                                    window.__c4a_text_stability = {length: chars, time: now};
+                                    return false;
+                                }
+                                return now - stamp.time > 1000;
+                            }""", arg=is_core, polling=200, timeout=35000)
                             await page.wait_for_timeout(650)
                             original_dom = await page.content()
                             page_dir = core.output_dir_for_url(url, root)
                             page_dir.mkdir(parents=True, exist_ok=True)
                             (page_dir / "browser-rendered.html").write_text(original_dom, encoding="utf-8")
-                            capture_count, capture_errors = await capture_unrecoverable_math(page, page_dir)
-                            svg_preview_count, svg_preview_errors, xml_assets = await capture_svg_previews(page, page_dir)
+                            capture_count, capture_errors = 0, []
+                            svg_preview_count, svg_preview_errors, xml_assets = 0, [], []
+                            # Some pages lazily insert additional KaTeX and SVG
+                            # nodes after the first render. Capture twice or
+                            # until stable, never reusing an asset ID.
+                            for capture_round in range(3):
+                                count, errors = await capture_unrecoverable_math(page, page_dir)
+                                previews, svg_errors, new_xml = await capture_svg_previews(page, page_dir)
+                                capture_count += count
+                                capture_errors.extend(errors)
+                                svg_preview_count += previews
+                                svg_preview_errors.extend(svg_errors)
+                                xml_assets.extend(new_xml)
+                                if capture_round > 0 and count == 0 and previews == 0:
+                                    break
+                                await page.wait_for_timeout(450)
+                            # Save the DOM only after the dynamic content has
+                            # stabilized. The earlier page HTML may be partial.
+                            (page_dir / "browser-rendered.html").write_text(
+                                await page.content(), encoding="utf-8",
+                            )
                             await page.evaluate("""() => {
                                 document.querySelectorAll('.td-content img').forEach(img => {
                                     const src = img.currentSrc;
                                     if (src && /^https?:\/\//.test(src))
                                         img.setAttribute('data-archive-current-src', src);
+                                });
+                            }""")
+                            # Keep original full DOM separately. Browser-exported SVGs
+                            # must not be reparsed as raw foreignObject HTML by
+                            # BeautifulSoup; replace only the *annotated* DOM
+                            # with links to the already validated local SVGs.
+                            await page.evaluate(r"""() => {
+                                document.querySelectorAll(
+                                  '.td-content svg[data-archive-svg-serialized]'
+                                ).forEach((svg, i) => {
+                                    const source = svg.getAttribute('data-archive-svg-serialized');
+                                    if (!/^assets\/svg\/figure-[0-9]+\.svg$/.test(source || '')) return;
+                                    const img = document.createElement('img');
+                                    img.setAttribute('src', source);
+                                    // Keep diagram labels searchable in Markdown
+                                    // even when the vector uses foreignObject.
+                                    const labels = Array.from(
+                                        svg.querySelectorAll('text, foreignObject')
+                                    ).map(node => (node.textContent || '').trim())
+                                     .filter(Boolean).join(' ').replace(/\s+/g, ' ');
+                                    const caption = svg.querySelector('title, desc')?.textContent?.trim();
+                                    img.setAttribute('alt',
+                                        (svg.getAttribute('aria-label') || caption ||
+                                         labels || 'SVG diagram ' + (i + 1)).slice(0, 400));
+                                    img.setAttribute('data-archive-browser-svg', 'true');
+                                    svg.replaceWith(img);
                                 });
                             }""")
                             annotated_dom = await page.content()
@@ -372,6 +462,7 @@ async def render_pages(
                                 "resolved_url": page.url or url,
                                 "status_code": response.status,
                                 "html_chars": len(annotated_dom),
+                                "domcontentloaded": domcontentloaded,
                                 "formula_images": capture_count,
                                 "formula_capture_failures": capture_errors,
                                 "svg_preview_count": svg_preview_count,
@@ -453,6 +544,7 @@ async def archive(args: argparse.Namespace) -> None:
                 record, navigation = {"url": url, "success": False, "error": str(exc)}, []
         rendered = rendered_pages.get(url, {})
         record["browser_rendered"] = bool(rendered.get("success"))
+        record["browser_domcontentloaded"] = rendered.get("domcontentloaded")
         record["browser_status_code"] = rendered.get("status_code")
         record["browser_rendered_html_chars"] = rendered.get("html_chars", 0)
         record["browser_render_seconds"] = rendered.get("elapsed_seconds")
@@ -468,6 +560,8 @@ async def archive(args: argparse.Namespace) -> None:
             issues.append("page_extract_failed")
         if not rendered.get("success"):
             issues.append("browser_render_failed")
+        if rendered.get("success") and rendered.get("domcontentloaded") is False:
+            issues.append("browser_document_loading_timeout")
         if record["formula_capture_failures"]:
             issues.append("formula_screenshot_failed")
         if any("error" in item for item in record["svg_preview_failures"]):
