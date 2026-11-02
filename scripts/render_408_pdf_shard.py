@@ -137,7 +137,7 @@ def inspect_pdf(path: Path, source_chars: int) -> dict:
             "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
         }
 
-async def stabilize(page) -> dict:
+async def stabilize(page, min_chars: int = 80) -> dict:
     await page.wait_for_selector(".td-content", state="visible", timeout=30000)
     # A .td-content node with temporarily stable text is NOT enough:
     # the server streams later chapters into the same DOM. Wait for actual
@@ -154,7 +154,7 @@ async def stabilize(page) -> dict:
                 const node = document.querySelector('.td-content');
                 if (!node) return false;
                 const n = (node.innerText || '').trim().length;
-                if (n < 80) return false;
+                if (n < minChars) return false;
                 const now = Date.now(), old = window.__pdfStable;
                 if (!old || old.n !== n) {
                     window.__pdfStable = {n, time: now};
@@ -162,7 +162,7 @@ async def stabilize(page) -> dict:
                 }
                 return now - old.time >= 1400;
             }""",
-            polling=250, timeout=35000,
+            arg=min_chars, polling=250, timeout=35000,
         )
     except Exception:
         # The website may continuously edit the rendered article (e.g. course
@@ -172,7 +172,7 @@ async def stabilize(page) -> dict:
         available = await page.evaluate(
             "() => (document.querySelector('.td-content')?.innerText || '').trim().length"
         )
-        if available < 350:
+        if available < min_chars:
             raise RuntimeError(f"Article never stabilized and is too short: {available} chars")
         print(f"[PDF WARN] Non-stable DOM, rendering available {available} chars", flush=True)
         await page.wait_for_timeout(4000)
@@ -275,7 +275,8 @@ async def render_one(browser, url: str, root: Path, semaphore: asyncio.Semaphore
                 response = await page.goto(url, wait_until="commit", timeout=45000)
                 if response is None or response.status >= 400:
                     raise RuntimeError("HTTP %s" % (response.status if response else "none"))
-                stats = await stabilize(page)
+                path_parts = [part for part in urlsplit(url).path.strip("/").split("/") if part]
+                stats = await stabilize(page, min_chars=35 if len(path_parts) == 2 else 80)
                 await page.add_style_tag(content=PRINT_CSS)
                 # Simulate the physical printable width before Chrome paginates.
                 # Without this, desktop-width draw.io diagrams can extend beyond
