@@ -22,3 +22,65 @@ jobs:
       - run: python -m pip install -r requirements-ai.txt
       - run: python -m compileall -q scripts tests
       - run: python -m unittest tests.test_ai_archive tests.test_shard_plan -v
+
+  smoke:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: |
+          python -m pip install -r requirements-ai.txt
+          python -m pip install "playwright>=1.55,<2"
+          python -m playwright install --with-deps chromium
+      - name: Smoke crawl a formula page and historically problematic SVG page
+        run: |
+          python - <<'PY'
+          import base64, json
+          from pathlib import Path
+          pages = [
+              "https://csgraduates.com/constitution_principle/instruction/concepts/",
+              "https://csgraduates.com/data_structure/tree/btree/",
+          ]
+          payload = base64.urlsafe_b64encode(json.dumps(pages).encode()).decode()
+          Path("smoke-urls.txt").write_text(payload)
+          PY
+          python scripts/crawl_site_ai_shard.py \
+            --urls-b64 "$(cat smoke-urls.txt)" \
+            --shard-name "408 fidelity smoke" \
+            --output-dir artifacts/site \
+            --concurrency 2 \
+            --render-concurrency 1 \
+            --render-timeout-ms 30000 \
+            --retries 1
+      - name: Merge and validate actual archive files
+        run: |
+          mkdir -p artifacts/shards
+          python - <<'PY'
+          import shutil
+          shutil.make_archive("artifacts/shards/smoke", "zip",
+                              root_dir="artifacts", base_dir="site")
+          PY
+          python scripts/merge_ai_shards.py --shards-dir artifacts/shards --output-dir artifacts/verified
+          python - <<'PY'
+          import json
+          data = json.load(open("artifacts/verified/quality-report.json"))
+          print(json.dumps(data, ensure_ascii=False, indent=2))
+          if data["page_count"] != 2:
+              raise SystemExit("Smoke test must contain both expected pages")
+          PY
+      - name: Upload real-world fidelity sample
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: knowledge-fidelity-smoke-${{ github.run_id }}
+          path: |
+            artifacts/site/shard-manifest.json
+            artifacts/site/pages
+            artifacts/verified/quality-report.json
+          retention-days: 30
+          if-no-files-found: warn
+          compression-level: 6

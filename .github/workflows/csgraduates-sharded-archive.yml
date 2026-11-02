@@ -130,8 +130,8 @@ jobs:
             --shard-name "$SHARD_LABEL" \
             --output-dir artifacts/site \
             --article-selector .td-content \
-            --concurrency 10 \
-            --render-concurrency 4
+            --concurrency 4 \
+            --render-concurrency 2
 
       - name: Package shard ZIP
         run: |
@@ -236,5 +236,24 @@ jobs:
           name: csgraduates-ai-archive-${{ github.run_id }}
           path: artifacts/csgraduates-ai-archive.zip
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 90
           compression-level: 0
+
+      - name: Reject unverified core subject archives (after artifact upload)
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          manifest = json.loads(Path("artifacts/site/manifest.json").read_text())
+          core = ("pages/data_structure/", "pages/constitution_principle/",
+                  "pages/operating_system/", "pages/computer_network/")
+          invalid = [
+              p for p in manifest["pages"]
+              if str(p.get("output_dir", "")).startswith(core) and not p.get("quality_pass")
+          ]
+          print(f"408 knowledge pages needing review: {len(invalid)}")
+          for page in invalid[:30]:
+              print(page.get("url"), page.get("quality_issues"))
+          if invalid:
+              raise SystemExit("408 knowledge archive is incomplete; artifact is uploaded for diagnosis.")
+          PY
