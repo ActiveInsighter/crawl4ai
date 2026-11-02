@@ -101,6 +101,51 @@ async def _remove_formula_marker(page, identifier: str) -> None:
     )
 
 
+async def capture_svg_previews(page, page_dir: Path) -> tuple[int, list[dict]]:
+    """Keep browser-faithful PNG copies alongside editable standalone SVG."""
+    ids = await page.evaluate(r"""() => {
+        const nodes = document.querySelectorAll('.td-content svg');
+        const ids = [];
+        for (const svg of nodes) {
+            if (svg.closest('.katex') || svg.closest('mjx-container')) continue;
+            if (svg.parentElement?.closest('svg')) continue;
+            if (svg.getAttribute('aria-hidden') === 'true') continue;
+            if (['presentation', 'none'].includes(svg.getAttribute('role'))) continue;
+            if (svg.classList.contains('kp-icon')) continue;
+            const id = String(ids.length + 1).padStart(3, '0');
+            svg.setAttribute('data-archive-svg-shot-id', id);
+            ids.push(id);
+        }
+        return ids;
+    }""")
+    previews = 0
+    errors = []
+    folder = page_dir / "assets" / "svg-previews"
+    folder.mkdir(parents=True, exist_ok=True)
+    for identifier in ids:
+        locator = page.locator('svg[data-archive-svg-shot-id="' + identifier + '"]').first
+        relative = f"assets/svg-previews/figure-{identifier}.png"
+        try:
+            await locator.screenshot(
+                path=str(page_dir / relative), animations="disabled", timeout=12_000,
+            )
+            await locator.evaluate(
+                "(el, path) => el.setAttribute('data-archive-svg-preview', path)",
+                relative,
+            )
+            previews += 1
+        except Exception as exc:
+            errors.append({"svg_id": identifier, "error": str(exc)})
+        finally:
+            await page.evaluate(
+                """id => { const svg = document.querySelector(
+                    'svg[data-archive-svg-shot-id="' + id + '"]');
+                    if (svg) svg.removeAttribute('data-archive-svg-shot-id'); }""",
+                identifier,
+            )
+    return previews, errors
+
+
 async def render_pages(
     urls: list[str],
     root: Path,
@@ -139,6 +184,7 @@ async def render_pages(
                             page_dir.mkdir(parents=True, exist_ok=True)
                             (page_dir / "browser-rendered.html").write_text(original_dom, encoding="utf-8")
                             capture_count, capture_errors = await capture_unrecoverable_math(page, page_dir)
+                            svg_preview_count, svg_preview_errors = await capture_svg_previews(page, page_dir)
                             annotated_dom = await page.content()
                             results[url] = {
                                 "success": True,
@@ -148,6 +194,8 @@ async def render_pages(
                                 "html_chars": len(annotated_dom),
                                 "formula_images": capture_count,
                                 "formula_capture_failures": capture_errors,
+                                "svg_preview_count": svg_preview_count,
+                                "svg_preview_failures": svg_preview_errors,
                                 "elapsed_seconds": round(time.perf_counter() - started, 3),
                             }
                             print(
@@ -231,6 +279,8 @@ async def archive(args: argparse.Namespace) -> None:
             record["browser_render_error"] = rendered.get("error", "render failed")
         record["formula_images"] = rendered.get("formula_images", 0)
         record["formula_capture_failures"] = rendered.get("formula_capture_failures", [])
+        record["svg_preview_count"] = rendered.get("svg_preview_count", 0)
+        record["svg_preview_failures"] = rendered.get("svg_preview_failures", [])
         issues = list(record.get("quality_issues", []))
         if not record.get("success"):
             issues.append("page_extract_failed")
@@ -238,6 +288,10 @@ async def archive(args: argparse.Namespace) -> None:
             issues.append("browser_render_failed")
         if record["formula_capture_failures"]:
             issues.append("formula_screenshot_failed")
+        if record["svg_preview_failures"]:
+            issues.append("svg_preview_failed")
+        if rendered.get("success") and record.get("svg_count", 0) > record["svg_preview_count"]:
+            issues.append("missing_svg_visual_preview")
         record["quality_issues"] = sorted(set(issues))
         record["quality_pass"] = not issues
 

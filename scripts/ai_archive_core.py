@@ -347,6 +347,7 @@ def export_inline_svgs(article: Tag, output_dir: Path) -> tuple[list[dict[str, A
             skipped += 1
             svg.decompose()
             continue
+        preview = text_value(svg.attrs.pop("data-archive-svg-preview", "")).strip()
         restore_svg_case(svg)
         index = len(manifest) + 1
         svg_dir = output_dir / "assets" / "svg"
@@ -362,7 +363,7 @@ def export_inline_svgs(article: Tag, output_dir: Path) -> tuple[list[dict[str, A
         alt = ((title.get_text(" ", strip=True) if title else "") or (desc.get_text(" ", strip=True) if desc else "") or visible or f"SVG figure {index}")[:240]
         image = article.new_tag("img", src=relative, alt=alt)
         svg.replace_with(image)
-        manifest.append({"path": relative, "bytes": path.stat().st_size})
+        manifest.append({"path": relative, "bytes": path.stat().st_size, "preview": preview})
     return manifest, skipped
 
 
@@ -539,6 +540,7 @@ async def process_page(url: str, archive_root: Path, article_selector: str = ".t
         "markdown_chars": len(markdown),
         "html_chars": len(content_html),
         "svg_count": len(svgs),
+        "svg_assets": svgs,
         "decorative_svg_skipped": skipped_svgs,
         "image_count": image_count,
         "image_failures": image_failures,
