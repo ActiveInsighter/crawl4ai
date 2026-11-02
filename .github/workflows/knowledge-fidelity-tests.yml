@@ -3,6 +3,7 @@ on:
   push:
     branches:
       - codex/408-knowledge-fidelity-20261102
+      - codex/408-fix-live-capture-20261102
   pull_request:
     paths:
       - 'scripts/ai_archive_core.py'
@@ -47,6 +48,8 @@ jobs:
           pages = [
               "https://csgraduates.com/constitution_principle/instruction/concepts/",
               "https://csgraduates.com/data_structure/tree/btree/",
+              "https://csgraduates.com/data_structure/",
+              "https://csgraduates.com/study_methods/english/english2/2025/",
           ]
           payload = base64.urlsafe_b64encode(json.dumps(pages).encode()).decode()
           Path("smoke-urls.txt").write_text(payload)
@@ -72,7 +75,7 @@ jobs:
           import json
           data = json.load(open("artifacts/verified/quality-report.json"))
           print(json.dumps(data, ensure_ascii=False, indent=2))
-          if data["page_count"] != 2:
+          if data["page_count"] != 4:
               raise SystemExit("Smoke test must contain both expected pages")
           PY
       - name: Upload real-world fidelity sample
