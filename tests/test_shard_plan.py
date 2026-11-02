@@ -8,10 +8,24 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from shard_plan import build_shards
+from shard_plan import build_shards, canonicalize
 
 
 class ShardPlanTests(unittest.TestCase):
+    def test_course_search_chapter_not_filtered_as_site_search(self):
+        site = "https://csgraduates.com/"
+        self.assertEqual(
+            canonicalize("https://csgraduates.com/data_structure/search/", site),
+            "https://csgraduates.com/data_structure/search/",
+        )
+        self.assertEqual(
+            canonicalize("https://csgraduates.com/data_structure/search/tree/", site),
+            "https://csgraduates.com/data_structure/search/tree/",
+        )
+        self.assertIsNone(canonicalize("https://csgraduates.com/search/", site))
+        self.assertIsNone(canonicalize("https://csgraduates.com/tags/", site))
+
+
     def test_groups_by_course_and_outer_directory_without_losing_urls(self):
         urls = [
             "https://csgraduates.com/",
