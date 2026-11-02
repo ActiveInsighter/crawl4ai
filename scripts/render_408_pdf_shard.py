@@ -139,6 +139,15 @@ def inspect_pdf(path: Path, source_chars: int) -> dict:
 
 async def stabilize(page) -> dict:
     await page.wait_for_selector(".td-content", state="visible", timeout=30000)
+    # A .td-content node with temporarily stable text is NOT enough:
+    # the server streams later chapters into the same DOM. Wait for actual
+    # document parsing first. Some third-party resources keep readyState
+    # loading indefinitely, so use bounded waits and a minimum settle period.
+    try:
+        await page.wait_for_load_state("domcontentloaded", timeout=20000)
+    except Exception:
+        pass
+    await page.wait_for_timeout(3000)
     await page.wait_for_function(
         """() => {
             const node = document.querySelector('.td-content');
@@ -200,7 +209,21 @@ async def stabilize(page) -> dict:
         )
     except Exception:
         pass
-    await page.wait_for_timeout(500)
+    await page.wait_for_timeout(2500)
+    # A second scroll after settling catches late-inserted SVG / formula
+    # sections and browser-loaded images without touching their source DOM.
+    await page.evaluate("""async () => {
+        const pause = ms => new Promise(r => setTimeout(r, ms));
+        const height = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
+        if (height > 3000) {
+            for (let y = 0; y < height; y += 1200) {
+                window.scrollTo(0, y);
+                await pause(45);
+            }
+        }
+        window.scrollTo(0, 0);
+    }""")
+    await page.wait_for_timeout(1500)
     result = await page.evaluate("""() => {
         const root = document.querySelector('.td-content');
         const images = Array.from(root.querySelectorAll('img'));
