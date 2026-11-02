@@ -52,6 +52,10 @@ jobs:
               "https://csgraduates.com/data_structure/",
               "https://csgraduates.com/",
               "https://csgraduates.com/code/",
+              "https://csgraduates.com/data_structure/graph/defs/",
+              "https://csgraduates.com/operating_system/memory/management/",
+              "https://csgraduates.com/computer_network/network/ip/",
+              "https://csgraduates.com/constitution_principle/storage/cache/",
               "https://csgraduates.com/study_methods/english/english2/2025/",
           ]
           payload = base64.urlsafe_b64encode(json.dumps(pages).encode()).decode()
@@ -78,8 +82,8 @@ jobs:
           import json
           data = json.load(open("artifacts/verified/quality-report.json"))
           print(json.dumps(data, ensure_ascii=False, indent=2))
-          if data["page_count"] != 6:
-              raise SystemExit("Smoke test must contain six expected pages")
+          if data["page_count"] != 10:
+              raise SystemExit("Smoke test must contain ten expected pages")
           PY
       - name: Upload real-world fidelity sample
         if: always()
