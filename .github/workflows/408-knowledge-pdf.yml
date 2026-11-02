@@ -131,7 +131,7 @@ jobs:
   merge:
     name: Verify and package four subject PDF volumes
     needs: [prepare, render]
-    if: ${{ always() }} && needs.prepare.result == 'success' && needs.render.result != 'cancelled'
+    if: ${{ always() && needs.prepare.result == 'success' && needs.render.result != 'cancelled' }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
