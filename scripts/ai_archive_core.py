@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
+import xml.etree.ElementTree as ET
 import mimetypes
 import re
 from pathlib import Path, PurePosixPath
@@ -23,7 +25,7 @@ ARTICLE_SELECTORS = (
     "[role='main']",
     "main",
 )
-MATH_ATTRS = ("data-tex", "data-latex", "data-math", "alttext", "aria-label")
+MATH_ATTRS = ("data-tex", "data-latex", "data-math", "alttext")
 SOURCE_MATH_RE = re.compile(
     r"(?P<dollar>\$\$(?P<dollar_tex>.+?)\$\$)"
     r"|(?P<bracket>\\\[(?P<bracket_tex>.+?)\\\])"
@@ -175,6 +177,8 @@ def clean_article(article: Tag) -> None:
         "script, noscript, template, nav, footer, .td-page-meta, .td-toc, "
         ".feedback--answer, .taxonomy-terms-cloud"
     ):
+        if node.name == "script" and (node.get("type") or "").startswith("math/tex"):
+            continue
         node.decompose()
     for style in list(article.find_all("style")):
         if style.find_parent("svg") is None:
@@ -229,12 +233,25 @@ def _is_display_math(node: Tag) -> bool:
     )
 
 
-def replace_math_with_tokens(article: Tag, source_formulas: list[dict[str, Any]]) -> dict[str, str]:
+def replace_math_with_tokens(
+    article: Tag,
+    source_formulas: list[dict[str, Any]] | None = None,
+    *,
+    stats: dict[str, int] | None = None,
+) -> dict[str, str]:
+    """Use only authoritative TeX or a screenshot of the actual browser formula.
+
+    Source formulas must never be mapped to rendered math by ordinal index:
+    hidden elements and duplicated MathML nodes make such matching unsafe.
+    """
     replacements: dict[str, str] = {}
     processed: set[int] = set()
-    formula_index = 0
+    counts = {"total": 0, "tex": 0, "image": 0, "unresolved": 0}
+    index = 0
     for node in list(article.select(".katex, mjx-container, math")):
         if node.parent is None or not any(parent is article for parent in node.parents):
+            continue
+        if node.name == "math" and (node.find_parent(class_="katex") or node.find_parent("mjx-container")):
             continue
         container = node
         if "katex" in (node.get("class") or []):
@@ -245,16 +262,29 @@ def replace_math_with_tokens(article: Tag, source_formulas: list[dict[str, Any]]
         if marker in processed or container.parent is None:
             continue
         processed.add(marker)
-        display = _is_display_math(container)
+        index += 1
+        counts["total"] += 1
         tex = _extract_tex(node) or _extract_tex(container)
-        if not tex and formula_index < len(source_formulas):
-            tex = text_value(source_formulas[formula_index].get("tex")).strip()
-        formula_index += 1
         if not tex:
-            continue
-        token = f"C4AMATHTOKEN{formula_index:04d}END"
-        replacements[token] = f"$$\n{tex}\n$$" if display else f"${tex}$"
+            annotation = container.select_one('annotation[encoding="application/x-tex"]')
+            if annotation:
+                tex = annotation.get_text("", strip=True)
+        token = f"C4AMATHTOKEN{index:04d}END"
+        if tex:
+            replacements[token] = (f"$$\n{tex}\n$$" if _is_display_math(container) else "$" + tex + "$")
+            counts["tex"] += 1
+        else:
+            fallback = text_value(container.get("data-archive-formula-image") or node.get("data-archive-formula-image"))
+            if fallback.startswith("assets/formulas/") and ".." not in fallback:
+                replacements[token] = f"![Rendered mathematical formula]({fallback})"
+                counts["image"] += 1
+            else:
+                counts["unresolved"] += 1
+                # Do not guess TeX: leave the original DOM, and report for review.
+                continue
         container.replace_with(NavigableString(token))
+    if stats is not None:
+        stats.update(counts)
     return replacements
 
 
@@ -269,6 +299,8 @@ def restore_svg_case(svg: Tag) -> None:
                 node.attrs[canonical_attr] = node.attrs.pop(key)
     if not svg.get("xmlns"):
         svg["xmlns"] = "http://www.w3.org/2000/svg"
+    if any("xlink:" in str(key) for node in [svg, *svg.find_all(True)] for key in node.attrs):
+        svg["xmlns:xlink"] = "http://www.w3.org/1999/xlink"
 
 
 def _is_decorative_svg(svg: Tag) -> bool:
@@ -277,6 +309,32 @@ def _is_decorative_svg(svg: Tag) -> bool:
         or text_value(svg.get("role")).lower() in {"none", "presentation"}
         or "kp-icon" in set(svg.get("class") or [])
     )
+
+
+async def inline_svg_images(article: Tag, base_url: str) -> list[dict[str, str]]:
+    """Embed external SVG <image> resources as data URIs for offline rendering."""
+    failures: list[dict[str, str]] = []
+    for image in article.select("svg image"):
+        attr = next((key for key in ("href", "xlink:href") if image.get(key)), None)
+        if not attr:
+            continue
+        original = text_value(image.get(attr)).strip()
+        if not original or original.startswith(("#", "data:")):
+            continue
+        absolute = urljoin(base_url, original)
+        try:
+            if not absolute.startswith(("https://", "http://")):
+                raise ValueError("unsupported SVG image URL")
+            payload, mime = await asyncio.to_thread(fetch_binary, absolute, base_url)
+            mime = mime.split(";", 1)[0].strip().lower()
+            if not payload or not mime.startswith("image/"):
+                raise ValueError("empty or non-image SVG dependency")
+            if mime == "image/svg+xml":
+                ET.fromstring(payload)
+            image[attr] = f"data:{mime};base64,{base64.b64encode(payload).decode('ascii')}"
+        except Exception as exc:
+            failures.append({"url": absolute, "error": str(exc)})
+    return failures
 
 
 def export_inline_svgs(article: Tag, output_dir: Path) -> tuple[list[dict[str, Any]], int]:
@@ -289,12 +347,24 @@ def export_inline_svgs(article: Tag, output_dir: Path) -> tuple[list[dict[str, A
             skipped += 1
             svg.decompose()
             continue
-        restore_svg_case(svg)
+        preview = text_value(svg.attrs.pop("data-archive-svg-preview", "")).strip()
+        serialized_source = text_value(svg.attrs.pop("data-archive-svg-serialized", "")).strip()
         index = len(manifest) + 1
         svg_dir = output_dir / "assets" / "svg"
         svg_dir.mkdir(parents=True, exist_ok=True)
         path = svg_dir / f"figure-{index:03d}.svg"
-        path.write_text(str(svg), encoding="utf-8")
+        if serialized_source and serialized_source.startswith("assets/svg/") and ".." not in serialized_source:
+            source_path = output_dir / serialized_source
+            if not source_path.is_file():
+                raise ValueError(f"Missing browser-serialized SVG: {serialized_source}")
+            # XMLSerializer operated on the live SVG DOM, preserving complex XHTML
+            # foreignObject children which BeautifulSoup's HTML parser corrupts.
+            serialized = source_path.read_text(encoding="utf-8")
+        else:
+            restore_svg_case(svg)
+            serialized = str(svg)
+        ET.fromstring(serialized)
+        path.write_text(serialized, encoding="utf-8")
         relative = PurePosixPath("assets", "svg", path.name).as_posix()
         title = svg.find("title")
         desc = svg.find("desc")
@@ -302,17 +372,27 @@ def export_inline_svgs(article: Tag, output_dir: Path) -> tuple[list[dict[str, A
         alt = ((title.get_text(" ", strip=True) if title else "") or (desc.get_text(" ", strip=True) if desc else "") or visible or f"SVG figure {index}")[:240]
         image = article.new_tag("img", src=relative, alt=alt)
         svg.replace_with(image)
-        manifest.append({"path": relative, "bytes": path.stat().st_size})
+        manifest.append({"path": relative, "bytes": path.stat().st_size, "preview": preview})
     return manifest, skipped
 
 
 def _image_source(img: Tag) -> str:
-    for attr in ("src", "data-src", "data-original", "data-lazy-src"):
-        value = text_value(img.get(attr)).strip()
-        if value:
-            return value
-    srcset = text_value(img.get("srcset")).strip()
-    return srcset.split(",", 1)[0].strip().split()[0] if srcset else ""
+    """Prefer the image actually displayed by Chromium, not a placeholder."""
+    source = text_value(img.get("src")).strip()
+    lazy = next((text_value(img.get(k)).strip() for k in
+                 ("data-src", "data-original", "data-lazy-src")
+                 if text_value(img.get(k)).strip()), "")
+    rendered = text_value(img.get("data-archive-current-src")).strip()
+    if lazy and (not source or source.startswith(("data:", "blob:"))):
+        return lazy
+    if rendered.startswith(("https://", "http://")):
+        return rendered
+    if source:
+        return source
+    srcset = text_value(img.get("srcset") or img.get("data-srcset")).strip()
+    if srcset:
+        return srcset.split(",")[-1].strip().split()[0]
+    return lazy
 
 
 def _image_filename(url: str, content_type: str) -> str:
@@ -332,7 +412,13 @@ async def localize_images(article: Tag, base_url: str, output_dir: Path) -> tupl
     failures: list[dict[str, str]] = []
     for img in article.find_all("img"):
         source = _image_source(img)
-        if not source or source.startswith(("data:", "blob:", "assets/")):
+        if not source:
+            failures.append({"url": "", "error": "image element without source"})
+            continue
+        if source.startswith("blob:"):
+            failures.append({"url": source, "error": "blob image requires browser capture"})
+            continue
+        if source.startswith(("data:", "assets/")):
             continue
         absolute = urljoin(base_url, source)
         if not absolute.startswith(("http://", "https://")):
@@ -346,11 +432,20 @@ async def localize_images(article: Tag, base_url: str, output_dir: Path) -> tupl
             image_dir = output_dir / "assets" / "images"
             image_dir.mkdir(parents=True, exist_ok=True)
             filename = _image_filename(absolute, content_type)
+            if not payload or not content_type.split(";", 1)[0].strip().lower().startswith("image/"):
+                raise ValueError("image fetch returned empty or non-image data")
+            if filename.lower().endswith(".svg"):
+                ET.fromstring(payload)
             (image_dir / filename).write_bytes(payload)
             relative = PurePosixPath("assets", "images", filename).as_posix()
             cache[absolute] = relative
             img["src"] = relative
             img.attrs.pop("srcset", None)
+            img.attrs.pop("data-archive-current-src", None)
+            # A <picture><source> overrides the rewritten local <img>.
+            if img.parent and img.parent.name == "picture":
+                for responsive in list(img.parent.find_all("source")):
+                    responsive.decompose()
             for attr in ("data-src", "data-original", "data-lazy-src"):
                 img.attrs.pop(attr, None)
             count += 1
@@ -437,10 +532,11 @@ async def process_page(url: str, archive_root: Path, article_selector: str = ".t
     page_dir.mkdir(parents=True, exist_ok=True)
     soup = BeautifulSoup(html, "html.parser")
     title = _title_from_soup(soup, url)
-    source_formulas = extract_source_formulas(html, article_selector)
+    # Never match TeX to rendered DOM by its position alone.
     article, selector = select_article(soup, article_selector)
     clean_article(article)
     normalize_links(article, resolved)
+    svg_dependency_failures = await inline_svg_images(article, resolved)
     svgs, skipped_svgs = export_inline_svgs(article, page_dir)
     image_count, image_failures = await localize_images(article, resolved, page_dir)
 
@@ -450,7 +546,8 @@ async def process_page(url: str, archive_root: Path, article_selector: str = ".t
 
     md_soup = BeautifulSoup(content_html, "html.parser")
     md_article, _ = select_article(md_soup, article_selector)
-    replacements = replace_math_with_tokens(md_article, source_formulas)
+    math_stats: dict[str, int] = {}
+    replacements = replace_math_with_tokens(md_article, stats=math_stats)
     markdown = html_to_markdown(str(md_article), heading_style="ATX", bullets="-").strip()
     for token, latex in replacements.items():
         markdown = markdown.replace(token, latex)
@@ -466,9 +563,25 @@ async def process_page(url: str, archive_root: Path, article_selector: str = ".t
         "markdown_chars": len(markdown),
         "html_chars": len(content_html),
         "svg_count": len(svgs),
+        "svg_assets": svgs,
         "decorative_svg_skipped": skipped_svgs,
         "image_count": image_count,
         "image_failures": image_failures,
+        "svg_dependency_failures": svg_dependency_failures,
+        "math": math_stats,
         "elapsed_seconds": round(asyncio.get_running_loop().time() - started, 3),
     }
+    issues = []
+    if selector in {"body", "document"}:
+        issues.append("article_selector_fell_back_to_body")
+    if len(markdown.strip()) < 80:
+        issues.append("short_or_empty_markdown")
+    if image_failures:
+        issues.append("image_download_failed")
+    if svg_dependency_failures:
+        issues.append("svg_external_dependency_failed")
+    if math_stats["unresolved"]:
+        issues.append("unresolved_math")
+    record["quality_issues"] = issues
+    record["quality_pass"] = not issues
     return record, extract_navigation(html, resolved)
