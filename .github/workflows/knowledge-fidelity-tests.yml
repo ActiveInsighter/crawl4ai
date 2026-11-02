@@ -84,6 +84,18 @@ jobs:
           print(json.dumps(data, ensure_ascii=False, indent=2))
           if data["page_count"] != 10:
               raise SystemExit("Smoke test must contain ten expected pages")
+          records = json.load(open("artifacts/site/shard-manifest.json"))["pages"]
+          incomplete = [
+              {"url": rec.get("url"), "error": rec.get("error"), "issues": rec.get("quality_issues")}
+              for rec in records
+              if (not rec.get("success") or not rec.get("browser_rendered") or
+                  (rec.get("math") or {}).get("unresolved", 0) > 0 or
+                  "missing_svg_visual_preview" in rec.get("quality_issues", []) or
+                  "svg_capture_failed" in rec.get("quality_issues", []))
+          ]
+          if incomplete:
+              raise SystemExit("Real-world fidelity test found incomplete pages: " +
+                               json.dumps(incomplete, ensure_ascii=False))
           PY
       - name: Upload real-world fidelity sample
         if: always()
