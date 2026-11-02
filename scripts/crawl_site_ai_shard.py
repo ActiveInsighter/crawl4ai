@@ -349,17 +349,35 @@ async def render_pages(
                                 raise RuntimeError(f"HTTP {response.status if response else 'no response'}")
                             # Category indexes and home pages may have no Docsy .td-content.
                             # A browser-rendered page need not contain that exact selector.
+                            is_core = urlsplit(url).path.strip("/").split("/", 1)[0] in {
+                                "data_structure", "constitution_principle",
+                                "operating_system", "computer_network",
+                            }
                             await page.wait_for_selector(
+                                ".td-content" if is_core else
                                 ".td-content, main article, article, [role='main'], main, body",
-                                state="attached", timeout=20_000,
+                                state="attached", timeout=25_000,
                             )
-                            # document.readyState may stay "loading" indefinitely
-                            # when ads/assets stall. Check real article text instead:
-                            # it is the actual content required for an archive.
-                            await page.wait_for_function(
-                                "() => Boolean(document.body && document.body.innerText.trim().length > 20)",
-                                timeout=15_000,
-                            )
+                            # ReadyState can remain 'loading' for a long time due
+                            # to unrelated web resources. Instead require actual
+                            # content *and* a stable article-text length for 1s.
+                            # This prevents capturing the navbar before the
+                            # knowledge chapter has been parsed by Chromium.
+                            await page.wait_for_function(r"""(isCore) => {
+                                const node = isCore
+                                    ? document.querySelector('.td-content')
+                                    : (document.querySelector('.td-content, main article, article, [role="main"], main') ||
+                                       document.body);
+                                const chars = (node?.innerText || node?.textContent || '').trim().length;
+                                if (chars < (isCore ? 80 : 20)) return false;
+                                const now = Date.now();
+                                const stamp = window.__c4a_text_stability;
+                                if (!stamp || stamp.length !== chars) {
+                                    window.__c4a_text_stability = {length: chars, time: now};
+                                    return false;
+                                }
+                                return now - stamp.time > 1000;
+                            }""", arg=is_core, polling=200, timeout=35000)
                             await page.wait_for_timeout(650)
                             original_dom = await page.content()
                             page_dir = core.output_dir_for_url(url, root)
