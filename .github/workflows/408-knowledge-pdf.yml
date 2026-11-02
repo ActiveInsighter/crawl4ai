@@ -1,4 +1,4 @@
-name: 408 four-subject knowledge PDF archive
+name: 408 four-subject browser PDF only
 on:
   push:
     branches:
