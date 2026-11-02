@@ -55,13 +55,36 @@ nav[aria-label], .td-breadcrumbs, .feedback--answer,
   margin: 0 !important;
   position: static !important;
 }
-.td-content { display: block !important; }
-svg, img, canvas, figure, .katex-display, mjx-container, pre, table {
-  max-width: 100% !important;
-  break-inside: avoid;
-  page-break-inside: avoid;
+.td-content {
+  display: block !important;
+  width: 184mm !important;
+  max-width: 184mm !important;
+  min-width: 0 !important;
+  box-sizing: border-box !important;
 }
-svg, img { max-height: 250mm !important; }
+.td-content div, .td-content p, .td-content figure {
+  max-width: 100% !important;
+  box-sizing: border-box !important;
+}
+.td-content figure, .td-content svg:not(.katex svg):not(mjx-container svg),
+.td-content img, .td-content canvas {
+  float: none !important;
+  clear: both !important;
+  max-width: 100% !important;
+  max-height: 245mm !important;
+  break-inside: avoid !important;
+  page-break-inside: avoid !important;
+}
+.td-content svg:not(.katex svg):not(mjx-container svg) {
+  display: block !important;
+  height: auto !important;
+}
+.td-content figure, .td-content table, .td-content pre,
+.td-content .katex-display {
+  max-width: 100% !important;
+  break-inside: avoid !important;
+  page-break-inside: avoid !important;
+}
 .katex-display, pre { overflow: visible !important; }
 table { border-collapse: collapse; }
 thead { display: table-header-group; }
@@ -218,7 +241,25 @@ async def render_one(browser, url: str, root: Path, semaphore: asyncio.Semaphore
                     raise RuntimeError("HTTP %s" % (response.status if response else "none"))
                 stats = await stabilize(page)
                 await page.add_style_tag(content=PRINT_CSS)
+                # Simulate the physical printable width before Chrome paginates.
+                # Without this, desktop-width draw.io diagrams can extend beyond
+                # the printable A4 right margin and get silently clipped.
+                await page.set_viewport_size({"width": 760, "height": 1000})
                 await page.emulate_media(media="screen")
+                await page.evaluate("""() => {
+                    const root = document.querySelector('.td-content');
+                    if (!root) return;
+                    const allowed = root.getBoundingClientRect().right;
+                    for (const el of root.querySelectorAll('svg, img, canvas, figure, table')) {
+                        if (el.closest('.katex, mjx-container')) continue;
+                        const rect = el.getBoundingClientRect();
+                        if (rect.width > 660) {
+                            el.style.setProperty('max-width', '660px', 'important');
+                            if (el.tagName.toLowerCase() === 'svg')
+                                el.style.setProperty('width', '660px', 'important');
+                        }
+                    }
+                }""")
                 # Print the original loaded Chromium document, not an HTML copy.
                 await asyncio.wait_for(
                     page.pdf(
