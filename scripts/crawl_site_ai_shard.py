@@ -441,9 +441,16 @@ async def render_pages(
                                     if (!/^assets\/svg\/figure-[0-9]+\.svg$/.test(source || '')) return;
                                     const img = document.createElement('img');
                                     img.setAttribute('src', source);
+                                    // Keep diagram labels searchable in Markdown
+                                    // even when the vector uses foreignObject.
+                                    const labels = Array.from(
+                                        svg.querySelectorAll('text, foreignObject')
+                                    ).map(node => (node.textContent || '').trim())
+                                     .filter(Boolean).join(' ').replace(/\s+/g, ' ');
                                     const caption = svg.querySelector('title, desc')?.textContent?.trim();
                                     img.setAttribute('alt',
-                                        (svg.getAttribute('aria-label') || caption || 'SVG diagram ' + (i + 1)).slice(0, 240));
+                                        (svg.getAttribute('aria-label') || caption ||
+                                         labels || 'SVG diagram ' + (i + 1)).slice(0, 400));
                                     img.setAttribute('data-archive-browser-svg', 'true');
                                     svg.replaceWith(img);
                                 });
