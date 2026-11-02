@@ -151,7 +151,7 @@ jobs:
           python scripts/merge_408_pdf_shards.py \
             --shards-dir artifacts/shards \
             --output-dir artifacts/final \
-            --expected-count '${{ steps.plan.outputs.url_count }}'
+            --expected-count '${{ needs.prepare.outputs.url_count }}'
           python - <<'PY'
           import json
           from pathlib import Path
