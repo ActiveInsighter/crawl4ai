@@ -1,0 +1,292 @@
+name: 408 four-subject fidelity archive v2
+
+on:
+  push:
+    branches:
+      - run/408-core-validation-v2
+    paths:
+      - requirements-ai.txt
+      - scripts/ai_archive_core.py
+      - scripts/crawl_site_ai_shard.py
+      - scripts/shard_plan.py
+      - scripts/shard_plan_balanced.py
+      - scripts/merge_ai_shards.py
+      - tests/test_ai_archive.py
+      - tests/test_shard_plan.py
+      - .github/workflows/408-core-validation.yml
+  workflow_dispatch:
+    inputs:
+      chunk_size:
+        description: Maximum pages per large study-resource shard
+        required: true
+        default: "35"
+
+concurrency:
+  group: csgraduates-408-core-validation-v2
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: Plan balanced archive shards
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      url_count: ${{ steps.plan.outputs.url_count }}
+      shard_count: ${{ steps.plan.outputs.shard_count }}
+    env:
+      CHUNK_SIZE: ${{ github.event_name == 'workflow_dispatch' && inputs.chunk_size || '35' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Build balanced matrix from sitemap
+        id: plan
+        run: |
+          mkdir -p artifacts
+          python - <<'PY'
+          import json, os, sys
+          from pathlib import Path
+          from urllib.parse import urlsplit
+          sys.path.insert(0, "scripts")
+          from shard_plan import CORE_LABELS, discover_urls
+          from shard_plan_balanced import build_balanced_shards
+          all_urls = discover_urls("https://csgraduates.com/")
+          urls = [
+              u for u in all_urls
+              if urlsplit(u).path.strip("/").split("/")[0] in CORE_LABELS
+          ]
+          shards = build_balanced_shards(urls, chunk_size=35)
+          assert len(shards) == 4, f"Expected 4 core shards, got {len(shards)}"
+          result = {"url_count": len(urls), "shard_count": len(shards), "shards": shards}
+          Path("artifacts/shard-plan.json").write_text(json.dumps(result, ensure_ascii=False, indent=2))
+          with open(os.environ["GITHUB_OUTPUT"], "a") as handle:
+              handle.write("matrix=" + json.dumps(shards, ensure_ascii=False, separators=(",", ":")) + "\n")
+              handle.write("url_count=" + str(len(urls)) + "\n")
+              handle.write("shard_count=" + str(len(shards)) + "\n")
+          print(f"[408 CORE] {len(urls)} URLs in 4 independent subject shards")
+          PY
+
+      - name: Upload shard plan
+        uses: actions/upload-artifact@v7
+        with:
+          name: 408-core-shard-plan-${{ github.run_id }}
+          path: artifacts/shard-plan.json
+          retention-days: 7
+
+  test:
+    name: Run AI archive tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python with pip cache
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-ai.txt
+
+      - name: Install lightweight dependencies
+        run: pip install -r requirements-ai.txt
+
+      - name: Run lean archive tests
+        run: |
+          python -m unittest tests.test_ai_archive -v
+          python -m unittest tests.test_shard_plan -v
+
+  archive:
+    name: ${{ matrix.label }} · ${{ matrix.count }} pages
+    needs:
+      - prepare
+      - test
+    if: ${{ needs.prepare.result == 'success' && needs.test.result == 'success' }}
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        include: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      SHARD_ID: ${{ matrix.id }}
+      SHARD_LABEL: ${{ matrix.label }}
+      SHARD_URLS_B64: ${{ matrix.urls_b64 }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python with pip cache
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-ai.txt
+
+      - name: Install archive dependencies and Chromium
+        run: |
+          pip install -r requirements-ai.txt
+          pip install "playwright>=1.55,<2"
+          python -m playwright install --with-deps chromium
+
+      - name: Archive browser-rendered HTML and Markdown with live progress
+        run: |
+          python scripts/crawl_site_ai_shard.py \
+            --urls-b64 "$SHARD_URLS_B64" \
+            --shard-name "$SHARD_LABEL" \
+            --output-dir artifacts/site \
+            --article-selector .td-content \
+            --concurrency 4 \
+            --render-concurrency 2
+
+      - name: Package shard ZIP
+        run: |
+          python - <<'PY'
+          import os, shutil
+          shutil.make_archive(
+              f"artifacts/shard-{os.environ['SHARD_ID']}",
+              "zip",
+              root_dir="artifacts",
+              base_dir="site",
+          )
+          PY
+
+      - name: Add shard summary
+        if: always()
+        run: |
+          echo "## $SHARD_LABEL" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f artifacts/site/shard-manifest.json ]; then
+            python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          data=json.load(open('artifacts/site/shard-manifest.json', encoding='utf-8'))
+          print(
+              f"Pages: {data['page_count']} | Success: {data['success_count']} | "
+              f"Failed: {data['failure_count']} | Browser rendered: "
+              f"{data.get('browser_render_success_count', 0)} | "
+              f"Render failed: {data.get('browser_render_failure_count', 0)} | "
+              f"Elapsed: {data['elapsed_seconds']}s"
+          )
+          PY
+          fi
+
+      - name: Upload shard archive
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: 408-core-shard-${{ matrix.id }}-${{ github.run_id }}
+          path: artifacts/shard-${{ matrix.id }}.zip
+          if-no-files-found: warn
+          retention-days: 3
+          compression-level: 0
+
+  merge:
+    name: Merge four subject knowledge archives
+    needs:
+      - prepare
+      - archive
+    if: ${{ always() && needs.prepare.result == 'success' && needs.archive.result != 'cancelled' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Download all shard ZIPs
+        uses: actions/download-artifact@v7
+        with:
+          pattern: 408-core-shard-*-${{ github.run_id }}
+          path: artifacts/shards
+          merge-multiple: true
+
+      - name: Merge archive
+        run: |
+          python scripts/merge_ai_shards.py \
+            --shards-dir artifacts/shards \
+            --output-dir artifacts/site
+
+      - name: Package final Windows-compatible ZIP
+        run: |
+          python - <<'PY'
+          import shutil
+          shutil.make_archive(
+              "artifacts/408-core-archive",
+              "zip",
+              root_dir="artifacts",
+              base_dir="site",
+          )
+          PY
+
+      - name: Add final summary
+        if: always()
+        run: |
+          echo "## csgraduates AI archive" >> "$GITHUB_STEP_SUMMARY"
+          echo "Discovered URLs: ${{ needs.prepare.outputs.url_count }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Archive shards: ${{ needs.prepare.outputs.shard_count }}" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f artifacts/site/manifest.json ]; then
+            python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          data=json.load(open('artifacts/site/manifest.json', encoding='utf-8'))
+          print(f"Pages: {data['page_count']} | Success: {data['success_count']} | Failed: {data['failure_count']}")
+          PY
+          fi
+
+      - name: Upload AI archive
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: 408-core-archive-${{ github.run_id }}
+          path: artifacts/408-core-archive.zip
+          if-no-files-found: warn
+          retention-days: 90
+          compression-level: 0
+
+      - name: Reject unverified core subject archives (after artifact upload)
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          manifest = json.loads(Path("artifacts/site/manifest.json").read_text())
+          core = ("pages/data_structure/", "pages/constitution_principle/",
+                  "pages/operating_system/", "pages/computer_network/")
+          expected = int("${{ needs.prepare.outputs.url_count }}")
+          if manifest["page_count"] != expected:
+              raise SystemExit(f"Expected {expected} 408 pages; got {manifest['page_count']}")
+          hard_issues = {
+              "page_extract_failed", "browser_render_failed",
+              "browser_document_loading_timeout", "unresolved_math",
+              "missing_svg_visual_preview", "svg_capture_failed",
+              "formula_screenshot_failed", "image_download_failed",
+              "svg_external_dependency_failed", "missing_local_asset",
+              "empty_local_asset", "invalid_svg_xml", "short_or_empty_markdown",
+          }
+          invalid = [
+              p for p in manifest["pages"]
+              if not p.get("success") or any(
+                  issue in hard_issues for issue in p.get("quality_issues", [])
+              )
+          ]
+          warnings = [
+              p for p in manifest["pages"]
+              if "svg_vector_repaired_or_rasterized" in p.get("quality_issues", [])
+          ]
+          print(f"408 pages: {manifest['page_count']} | hard errors: {len(invalid)} | SVG fidelity warnings: {len(warnings)}")
+          for p in invalid[:35]:
+              print("ERROR", p.get("url"), p.get("quality_issues"))
+          if invalid:
+              raise SystemExit("Core knowledge archive has missing or degraded content; artifact uploaded for debugging.")
+          PY
