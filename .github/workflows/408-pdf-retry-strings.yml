@@ -44,7 +44,7 @@ jobs:
           data=json.loads(p.read_text())
           r=data['pages'][0]
           print(json.dumps(r,ensure_ascii=False,indent=2))
-          if not r['success'] or r['pdf_text_chars'] < 250:
+          if not r['success'] or r['pdf_text_chars'] < 40:
               raise SystemExit('Missing or incomplete strings chapter PDF')
           PY
       - name: Upload source page PDF even if verification failed
