@@ -1,0 +1,194 @@
+name: 408 four-subject knowledge PDF archive
+on:
+  push:
+    branches:
+      - run/408-pdf-only
+    paths:
+      - 'scripts/render_408_pdf_shard.py'
+      - 'scripts/merge_408_pdf_shards.py'
+      - 'scripts/shard_plan.py'
+      - 'scripts/shard_plan_balanced.py'
+      - 'requirements-pdf.txt'
+      - '.github/workflows/408-knowledge-pdf.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: 408-pdf-only-full-archive
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      url_count: ${{ steps.plan.outputs.url_count }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Discover only 408 four-subject knowledge URLs
+        id: plan
+        run: |
+          mkdir -p artifacts
+          python - <<'PY'
+          import json, os, sys
+          from pathlib import Path
+          from urllib.parse import urlsplit
+          sys.path.insert(0, 'scripts')
+          from shard_plan import CORE_LABELS, discover_urls
+          from shard_plan_balanced import build_balanced_shards
+          urls = [
+              u for u in discover_urls('https://csgraduates.com/')
+              if urlsplit(u).path.strip('/').split('/')[0] in CORE_LABELS
+          ]
+          shards = build_balanced_shards(urls, chunk_size=100)
+          assert len(shards) == 4, f'Expected 4 408 subject shards, found {len(shards)}'
+          assert 100 <= len(urls) <= 200, f'Unexpected 408 knowledge page count: {len(urls)}'
+          result = {'format': '408-original-browser-pdf-v1',
+                    'url_count': len(urls), 'shards': shards}
+          Path('artifacts/plan.json').write_text(json.dumps(result, ensure_ascii=False, indent=2))
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as fh:
+              fh.write('matrix=' + json.dumps(shards, ensure_ascii=False, separators=(',', ':')) + '\n')
+              fh.write('url_count=' + str(len(urls)) + '\n')
+          for shard in shards: print('[PDF PLAN]', shard['label'], shard['count'])
+          print('[408 PDF PLAN] TOTAL', len(urls))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: 408-pdf-plan-${{ github.run_id }}
+          path: artifacts/plan.json
+          retention-days: 30
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements-pdf.txt
+      - run: python -m unittest tests.test_408_pdf tests.test_shard_plan -v
+
+  render:
+    name: ${{ matrix.label }} original Chromium PDF
+    needs: [prepare, test]
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        include: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      URLS_B64: ${{ matrix.urls_b64 }}
+      SHARD_ID: ${{ matrix.id }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Chromium and Chinese fonts
+        run: |
+          pip install -r requirements-pdf.txt
+          python -m playwright install --with-deps chromium
+          sudo apt-get install -y fonts-noto-cjk
+      - name: Directly print all original knowledge pages (no extraction)
+        run: |
+          python scripts/render_408_pdf_shard.py \
+            --urls-b64 "$URLS_B64" \
+            --shard-name "${{ matrix.label }}" \
+            --output-dir artifacts/site \
+            --concurrency 2 --retries 2
+      - name: Write shard summary
+        if: always()
+        run: |
+          if [ -f artifacts/site/shard-manifest.json ]; then
+            python - <<'PY'
+          import json
+          r=json.load(open('artifacts/site/shard-manifest.json'))
+          print('PDF:',r['shard'],'Success:',r['success_count'],'/',r['page_count'],'Warnings:',r['warning_count'])
+          for x in r['pages']:
+              if not x.get('success') or x.get('warnings'):
+                  print(x['url'], x.get('error'), x.get('warnings'))
+          PY
+          fi
+      - name: Upload original source-page PDFs and diagnostic manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: 408-pdf-shard-${{ matrix.id }}-${{ github.run_id }}
+          path: artifacts/site
+          if-no-files-found: warn
+          retention-days: 90
+          compression-level: 0
+
+  merge:
+    name: Verify and package four subject PDF volumes
+    needs: [prepare, render]
+    if: ${{ always() && needs.prepare.result == 'success' && needs.render.result != 'cancelled' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements-pdf.txt
+      - name: Download four subject PDF folders
+        uses: actions/download-artifact@v4
+        with:
+          pattern: 408-pdf-shard-*-${{ github.run_id }}
+          path: artifacts/shards
+          merge-multiple: false
+      - name: Check every page PDF and merge the four volumes
+        run: |
+          python scripts/merge_408_pdf_shards.py \
+            --shards-dir artifacts/shards \
+            --output-dir artifacts/final \
+            --expected-count '${{ steps.plan.outputs.url_count }}'
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          result=json.loads(Path('artifacts/final/manifest.json').read_text())
+          print('[PDF SUMMARY] source pages',result['source_page_count'],
+                'valid',result['successful_pdf_count'],
+                'failed',result['failed_pdf_count'],
+                'warnings',result['warning_page_count'])
+          for slug, info in result['subjects'].items():
+              print(slug, info)
+          PY
+      - name: ZIP four PDF volumes, chapter PDFs and source index
+        run: |
+          python - <<'PY'
+          import shutil
+          shutil.make_archive('artifacts/408-knowledge-pdf-only',
+                              'zip', root_dir='artifacts', base_dir='final')
+          PY
+      - name: Upload verified PDF-only ZIP before quality gate
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: 408-knowledge-pdf-only-${{ github.run_id }}
+          path: |
+            artifacts/408-knowledge-pdf-only.zip
+            artifacts/final/manifest.json
+          if-no-files-found: warn
+          retention-days: 90
+          compression-level: 0
+      - name: Flag incomplete or degraded PDF pages
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          r=json.loads(Path('artifacts/final/manifest.json').read_text())
+          if r['failed_pdf_count'] or r['warning_page_count']:
+              for issue in r['issues'][:50]: print(issue)
+              raise SystemExit('PDFs generated but verification warnings remain. Examine uploaded artifact.')
+          print('ALL',r['source_page_count'],'408 knowledge pages printed without detected degradation')
+          PY
