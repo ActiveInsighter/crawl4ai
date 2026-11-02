@@ -363,6 +363,19 @@ async def render_pages(
                                 ".td-content, main article, article, [role='main'], main, body",
                                 state="attached", timeout=25_000,
                             )
+                            domcontentloaded = True
+                            if is_core:
+                                try:
+                                    # Core knowledge chapters should be parsed to
+                                    # the end before snapshot. The early .td-content
+                                    # and a 1s text plateau are insufficient on
+                                    # slowly streamed pages (IP, Cache).
+                                    await page.wait_for_load_state(
+                                        "domcontentloaded", timeout=28_000,
+                                    )
+                                except PlaywrightTimeoutError:
+                                    domcontentloaded = False
+                                    print("[RENDER WARN] DOMContentLoaded timeout: " + url, flush=True)
                             # ReadyState can remain 'loading' for a long time due
                             # to unrelated web resources. Instead require actual
                             # content *and* a stable article-text length for 1s.
@@ -442,6 +455,7 @@ async def render_pages(
                                 "resolved_url": page.url or url,
                                 "status_code": response.status,
                                 "html_chars": len(annotated_dom),
+                                "domcontentloaded": domcontentloaded,
                                 "formula_images": capture_count,
                                 "formula_capture_failures": capture_errors,
                                 "svg_preview_count": svg_preview_count,
@@ -523,6 +537,7 @@ async def archive(args: argparse.Namespace) -> None:
                 record, navigation = {"url": url, "success": False, "error": str(exc)}, []
         rendered = rendered_pages.get(url, {})
         record["browser_rendered"] = bool(rendered.get("success"))
+        record["browser_domcontentloaded"] = rendered.get("domcontentloaded")
         record["browser_status_code"] = rendered.get("status_code")
         record["browser_rendered_html_chars"] = rendered.get("html_chars", 0)
         record["browser_render_seconds"] = rendered.get("elapsed_seconds")
@@ -538,6 +553,8 @@ async def archive(args: argparse.Namespace) -> None:
             issues.append("page_extract_failed")
         if not rendered.get("success"):
             issues.append("browser_render_failed")
+        if rendered.get("success") and rendered.get("domcontentloaded") is False:
+            issues.append("browser_document_loading_timeout")
         if record["formula_capture_failures"]:
             issues.append("formula_screenshot_failed")
         if any("error" in item for item in record["svg_preview_failures"]):
