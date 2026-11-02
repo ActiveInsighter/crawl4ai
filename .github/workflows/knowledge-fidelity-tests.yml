@@ -8,6 +8,9 @@ on:
       - 'scripts/ai_archive_core.py'
       - 'scripts/crawl_site_ai_shard.py'
       - 'scripts/merge_ai_shards.py'
+      - 'scripts/shard_plan.py'
+      - 'scripts/shard_plan_balanced.py'
+      - 'tests/test_shard_plan.py'
       - 'tests/test_ai_archive.py'
       - '.github/workflows/knowledge-fidelity-tests.yml'
 jobs:
