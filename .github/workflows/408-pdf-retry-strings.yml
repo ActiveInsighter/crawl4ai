@@ -1,0 +1,58 @@
+name: Retry one incomplete 408 string knowledge PDF
+on:
+  push:
+    branches: [run/408-pdf-retry-strings]
+    paths:
+      - '.github/workflows/408-pdf-retry-strings.yml'
+      - 'scripts/render_408_pdf_shard.py'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  retry:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: |
+          pip install -r requirements-pdf.txt
+          python -m py_compile scripts/render_408_pdf_shard.py
+          python -m playwright install --with-deps chromium
+          sudo apt-get install -y fonts-noto-cjk
+      - name: Render actual strings chapter without HTML extraction
+        run: |
+          python - <<'PY'
+          import base64, json
+          from pathlib import Path
+          urls=['https://csgraduates.com/data_structure/strings/']
+          Path('urls.b64').write_text(base64.urlsafe_b64encode(json.dumps(urls).encode()).decode())
+          PY
+          python scripts/render_408_pdf_shard.py \
+            --urls-b64 "$(cat urls.b64)" \
+            --shard-name 'DS strings repair' \
+            --output-dir artifacts/site \
+            --concurrency 1 --retries 4
+      - name: Verify repaired PDF
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          p=Path('artifacts/site/shard-manifest.json')
+          data=json.loads(p.read_text())
+          r=data['pages'][0]
+          print(json.dumps(r,ensure_ascii=False,indent=2))
+          if not r['success'] or r['pdf_text_chars'] < 250:
+              raise SystemExit('Missing or incomplete strings chapter PDF')
+          PY
+      - name: Upload source page PDF even if verification failed
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: 408-strings-pdf-repair-${{ github.run_id }}
+          path: artifacts/site
+          if-no-files-found: warn
+          retention-days: 30
+          compression-level: 0
