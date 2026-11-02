@@ -1,5 +1,30 @@
 # crawl4ai test harness
 
+## 408 四门知识点：浏览器原生 PDF 导出（推荐）
+
+目前四门 408 知识点的正式导出路径使用 **Chromium 原网页打印 PDF**，不进行 Markdown、LaTeX、SVG 重建、图像提取或 OCR。仅处理数据结构、计算机组成原理、操作系统和计算机网络知识点；不抓取历年试卷或模拟卷。
+
+- 工作流：`.github/workflows/408-knowledge-pdf.yml`，运行分支 `run/408-pdf-only`。
+- 每个原始页面独立 PDF：`pages/<科目>/<章节>.pdf`。
+- 按科目合并：`subjects/data_structure.pdf`、`subjects/constitution_principle.pdf`、`subjects/operating_system.pdf`、`subjects/computer_network.pdf`；合订本附章节书签。
+- 全量 ZIP：`408-knowledge-pdf-only.zip`，包含全部原页面 PDF、四科合订本、`manifest.json` 校验与异常清单。
+- 知识点数以 Sitemap 实际扫描为准；每页保留源 URL、PDF 校验和、页数、文字数量、公式/SVG 数量和字体/图片告警。
+- PDF 渲染通过不代表来源网站知识内容本身绝对正确；仍应按 408 教材核对关键结论。
+
+调试命令：
+
+```bash
+pip install -r requirements-pdf.txt
+python -m playwright install --with-deps chromium
+python -m unittest tests.test_408_pdf -v
+python scripts/render_408_pdf_shard.py --urls-b64 '<base64url JSON URL array>' --shard-name '408 PDF' --output-dir artifacts/site
+```
+
+旧版 `scripts/crawl_site_ai_shard.py` 及原试卷 MDX 工具保留用于历史兼容，但 **408 知识点 PDF 工作流不会调用它们**。
+
+---
+
+
 ## Complete 408 MDX archive
 
 Long-answer questions can also be packaged separately into the four 408 subjects:
