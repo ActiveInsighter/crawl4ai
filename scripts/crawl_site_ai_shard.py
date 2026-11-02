@@ -374,6 +374,25 @@ async def render_pages(
                                         img.setAttribute('data-archive-current-src', src);
                                 });
                             }""")
+                            # Keep original full DOM separately. Browser-exported SVGs
+                            # must not be reparsed as raw foreignObject HTML by
+                            # BeautifulSoup; replace only the *annotated* DOM
+                            # with links to the already validated local SVGs.
+                            await page.evaluate(r"""() => {
+                                document.querySelectorAll(
+                                  '.td-content svg[data-archive-svg-serialized]'
+                                ).forEach((svg, i) => {
+                                    const source = svg.getAttribute('data-archive-svg-serialized');
+                                    if (!/^assets\/svg\/figure-[0-9]+\.svg$/.test(source || '')) return;
+                                    const img = document.createElement('img');
+                                    img.setAttribute('src', source);
+                                    const caption = svg.querySelector('title, desc')?.textContent?.trim();
+                                    img.setAttribute('alt',
+                                        (svg.getAttribute('aria-label') || caption || 'SVG diagram ' + (i + 1)).slice(0, 240));
+                                    img.setAttribute('data-archive-browser-svg', 'true');
+                                    svg.replaceWith(img);
+                                });
+                            }""")
                             annotated_dom = await page.content()
                             results[url] = {
                                 "success": True,
