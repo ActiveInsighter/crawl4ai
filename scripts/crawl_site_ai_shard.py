@@ -236,38 +236,65 @@ async def capture_svg_previews(page, page_dir: Path) -> tuple[int, list[dict], l
                 # from a clone; the exact browser DOM remains in the raw HTML.
                 repair_note = "invalid HTML attributes in foreignObject: " + str(exc)
                 try:
+                    # Many draw.io exports contain a malformed XHTML
+                    # foreignObject plus a *native* base64 image in <switch>.
+                    # Keep every vector path and use that original embedded
+                    # fallback image instead of rasterizing the entire SVG.
                     repaired = await locator.evaluate(r"""svg => {
                         const clone = svg.cloneNode(true);
-                        for (const node of clone.querySelectorAll('*')) {
-                            for (const attr of Array.from(node.attributes)) {
-                                if (!/^[A-Za-z_][A-Za-z0-9_.:-]*$/.test(attr.name)) {
-                                    node.removeAttribute(attr.name);
-                                }
+                        let dropped = 0;
+                        for (const node of Array.from(clone.querySelectorAll('foreignObject'))) {
+                            const parent = node.parentElement;
+                            if (parent?.localName !== 'switch') continue;
+                            const fallback = Array.from(parent.children).some(
+                                child => child !== node &&
+                                ['image', 'text', 'g'].includes(child.localName)
+                            );
+                            if (fallback) {
+                                node.remove();
+                                dropped++;
                             }
                         }
+                        if (!dropped) throw new Error('no native SVG switch fallback');
                         return new XMLSerializer().serializeToString(clone);
                     }""")
                     ET.fromstring(repaired)
                     xml = repaired
-                except Exception as repair_error:
-                    # A valid XML wrapper around the actual screenshot preserves
-                    # the exact visual when the original vector cannot be saved.
-                    if not screenshot_available:
-                        raise RuntimeError("No XML-safe vector or preview image") from repair_error
-                    png = (page_dir / preview_path).read_bytes()
-                    if len(png) < 24 or not png.startswith(b"\x89PNG\r\n\x1a\n"):
-                        raise ValueError("Invalid PNG fallback")
-                    width, height = struct.unpack(">II", png[16:24])
-                    if not width or not height:
-                        raise ValueError("Empty SVG screenshot dimensions")
-                    image_data = base64.b64encode(png).decode("ascii")
-                    xml = (
-                        f'<svg xmlns="http://www.w3.org/2000/svg" '
-                        f'width="{width}" height="{height}" viewBox="0 0 {width} {height}">'
-                        f'<image width="{width}" height="{height}" '
-                        f'href="data:image/png;base64,{image_data}"/></svg>'
-                    )
-                    repair_note += "; raster-backed SVG visual fallback"
+                    repair_note = "malformed XHTML replaced with original embedded SVG switch fallback"
+                except Exception:
+                    try:
+                        repaired = await locator.evaluate(r"""svg => {
+                            const clone = svg.cloneNode(true);
+                            for (const node of clone.querySelectorAll('*')) {
+                                for (const attr of Array.from(node.attributes)) {
+                                    if (!/^[A-Za-z_][A-Za-z0-9_.:-]*$/.test(attr.name)) {
+                                        node.removeAttribute(attr.name);
+                                    }
+                                }
+                            }
+                            return new XMLSerializer().serializeToString(clone);
+                        }""")
+                        ET.fromstring(repaired)
+                        xml = repaired
+                    except Exception as repair_error:
+                        # A valid XML wrapper around the actual screenshot preserves
+                        # the exact visual when the original vector cannot be saved.
+                        if not screenshot_available:
+                            raise RuntimeError("No XML-safe vector or preview image") from repair_error
+                        png = (page_dir / preview_path).read_bytes()
+                        if len(png) < 24 or not png.startswith(b"\x89PNG\r\n\x1a\n"):
+                            raise ValueError("Invalid PNG fallback")
+                        width, height = struct.unpack(">II", png[16:24])
+                        if not width or not height:
+                            raise ValueError("Empty SVG screenshot dimensions")
+                        image_data = base64.b64encode(png).decode("ascii")
+                        xml = (
+                            f'<svg xmlns="http://www.w3.org/2000/svg" '
+                            f'width="{width}" height="{height}" viewBox="0 0 {width} {height}">'
+                            f'<image width="{width}" height="{height}" '
+                            f'href="data:image/png;base64,{image_data}"/></svg>'
+                        )
+                        repair_note += "; raster-backed SVG visual fallback"
             xml, dependencies = await _self_contained_svg(xml, page.url)
             failures.extend({"svg_id": identifier, **item} for item in dependencies)
             ET.fromstring(xml)
