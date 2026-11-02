@@ -1,0 +1,24 @@
+name: Knowledge archive fidelity tests
+on:
+  push:
+    branches:
+      - codex/408-knowledge-fidelity-20261102
+  pull_request:
+    paths:
+      - 'scripts/ai_archive_core.py'
+      - 'scripts/crawl_site_ai_shard.py'
+      - 'scripts/merge_ai_shards.py'
+      - 'tests/test_ai_archive.py'
+      - '.github/workflows/knowledge-fidelity-tests.yml'
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r requirements-ai.txt
+      - run: python -m compileall -q scripts tests
+      - run: python -m unittest tests.test_ai_archive tests.test_shard_plan -v

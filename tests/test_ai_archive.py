@@ -71,6 +71,68 @@ class AiArchiveTests(unittest.TestCase):
             self.assertIsNotNone(image)
             self.assertEqual(image.get("src"), "assets/svg/figure-001.svg")
 
+    def test_formula_source_order_is_never_assumed(self):
+        from scripts.ai_archive_core import replace_math_with_tokens
+        soup = BeautifulSoup('<div class="td-content"><span class="katex"><span class="katex-html">unknown</span></span></div>', "html.parser")
+        counts = {}
+        changes = replace_math_with_tokens(soup.select_one(".td-content"), [{"tex": "WRONG"}], stats=counts)
+        self.assertEqual(changes, {})
+        self.assertEqual(counts["unresolved"], 1)
+        self.assertIn("unknown", soup.get_text())
+
+    def test_annotated_formula_and_screenshot_fallback(self):
+        from scripts.ai_archive_core import replace_math_with_tokens
+        soup = BeautifulSoup("""
+          <div class="td-content">
+            <span class="katex"><math><annotation encoding="application/x-tex">x^2</annotation></math></span>
+            <span class="katex" data-archive-formula-image="assets/formulas/formula-0001.png">
+              <span class="katex-html">visual</span></span>
+          </div>""", "html.parser")
+        stats = {}
+        changes = replace_math_with_tokens(soup.select_one(".td-content"), stats=stats)
+        self.assertEqual(stats, {"total": 2, "tex": 1, "image": 1, "unresolved": 0})
+        self.assertIn("x^2", "".join(changes.values()))
+        self.assertIn("formula-0001.png", "".join(changes.values()))
+
+    def test_lazy_source_is_not_gif_placeholder(self):
+        from scripts.ai_archive_core import _image_source
+        image = BeautifulSoup('<img src="data:image/gif;base64,AAAA" data-src="/figures/real.png">', "html.parser").img
+        self.assertEqual(_image_source(image), "/figures/real.png")
+
+    def test_svg_embeds_external_image_and_remains_valid_xml(self):
+        import asyncio
+        import xml.etree.ElementTree as ET
+        from unittest.mock import patch
+        from scripts.ai_archive_core import inline_svg_images
+        soup = BeautifulSoup('<div class="td-content"><svg viewBox="0 0 10 10"><image href="/cache.png"/></svg></div>', "html.parser")
+        article = soup.select_one(".td-content")
+        with patch("scripts.ai_archive_core.fetch_binary", return_value=(b"\x89PNG\r\n\x1a\nfake", "image/png")):
+            failures = asyncio.run(inline_svg_images(article, "https://csgraduates.com/"))
+        self.assertEqual(failures, [])
+        self.assertTrue(article.image["href"].startswith("data:image/png;base64,"))
+        with tempfile.TemporaryDirectory() as temp:
+            svgs, skipped = export_inline_svgs(article, Path(temp))
+            self.assertEqual((len(svgs), skipped), (1, 0))
+            ET.parse(Path(temp) / svgs[0]["path"])
+
+    def test_quality_report_detects_missing_assets(self):
+        from scripts.merge_ai_shards import verify_page_integrity, build_quality_report
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            page = root / "pages" / "operating_system" / "process" / "sync"
+            page.mkdir(parents=True)
+            (page / "content.md").write_text("![cache](assets/images/missing.png)")
+            (page / "content.html").write_text("<p>sync</p>")
+            record = {"success": True, "output_dir": "pages/operating_system/process/sync",
+                      "url": "https://example.test/", "browser_rendered": False}
+            issues = verify_page_integrity(record, root)
+            self.assertIn("missing_local_asset", issues)
+            record["quality_issues"] = issues
+            record["quality_pass"] = False
+            report = build_quality_report([record])
+            self.assertEqual(report["subjects"]["操作系统"]["review"], 1)
+
+
 
 if __name__ == "__main__":
     unittest.main()
