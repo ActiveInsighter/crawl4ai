@@ -377,13 +377,16 @@ def export_inline_svgs(article: Tag, output_dir: Path) -> tuple[list[dict[str, A
 
 
 def _image_source(img: Tag) -> str:
-    """Skip lazy-loading placeholders when the real image URL is available."""
+    """Prefer the image actually displayed by Chromium, not a placeholder."""
     source = text_value(img.get("src")).strip()
     lazy = next((text_value(img.get(k)).strip() for k in
                  ("data-src", "data-original", "data-lazy-src")
                  if text_value(img.get(k)).strip()), "")
+    rendered = text_value(img.get("data-archive-current-src")).strip()
     if lazy and (not source or source.startswith(("data:", "blob:"))):
         return lazy
+    if rendered.startswith(("https://", "http://")):
+        return rendered
     if source:
         return source
     srcset = text_value(img.get("srcset") or img.get("data-srcset")).strip()
@@ -409,7 +412,13 @@ async def localize_images(article: Tag, base_url: str, output_dir: Path) -> tupl
     failures: list[dict[str, str]] = []
     for img in article.find_all("img"):
         source = _image_source(img)
-        if not source or source.startswith(("data:", "blob:", "assets/")):
+        if not source:
+            failures.append({"url": "", "error": "image element without source"})
+            continue
+        if source.startswith("blob:"):
+            failures.append({"url": source, "error": "blob image requires browser capture"})
+            continue
+        if source.startswith(("data:", "assets/")):
             continue
         absolute = urljoin(base_url, source)
         if not absolute.startswith(("http://", "https://")):
@@ -432,6 +441,11 @@ async def localize_images(article: Tag, base_url: str, output_dir: Path) -> tupl
             cache[absolute] = relative
             img["src"] = relative
             img.attrs.pop("srcset", None)
+            img.attrs.pop("data-archive-current-src", None)
+            # A <picture><source> overrides the rewritten local <img>.
+            if img.parent and img.parent.name == "picture":
+                for responsive in list(img.parent.find_all("source")):
+                    responsive.decompose()
             for attr in ("data-src", "data-original", "data-lazy-src"):
                 img.attrs.pop(attr, None)
             count += 1

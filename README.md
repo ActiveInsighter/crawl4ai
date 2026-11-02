@@ -189,3 +189,22 @@ python scripts/crawl_site.py \
   --crawl-concurrency 3 \
   --pdf-concurrency 2
 ```
+
+
+## 408 knowledge crawler fidelity
+
+Four-subject knowledge pages are produced by scripts/crawl_site_ai_shard.py
+and scripts/merge_ai_shards.py, keeping the original browser DOM separately
+from AI-friendly HTML and Markdown.
+
+- Only authoritative MathML/KaTeX annotations become TeX. Formula positions are
+  never guessed. Unrecoverable math is preserved with live-browser screenshots.
+- Vector diagrams come from the actual browser SVG DOM rather than an HTML
+  parser, and include local PNG previews. Invalid foreignObject HTML may force
+  a raster-backed SVG fallback; such pages require review, not silent approval.
+- Image URLs, local assets and SHA-256 fingerprints are checked. Quality status,
+  errors and warnings are included in manifest.json and quality-report.json.
+- The complete archive is uploaded before the 408 quality gate; if quality
+  fails, the diagnostic archive is still available for correction.
+- Browser smoke checks cover a real ISA formula page and B-tree page.
+  They do not verify all 408 pages, or the subject-matter accuracy of the source.

@@ -272,6 +272,13 @@ async def render_pages(
                             (page_dir / "browser-rendered.html").write_text(original_dom, encoding="utf-8")
                             capture_count, capture_errors = await capture_unrecoverable_math(page, page_dir)
                             svg_preview_count, svg_preview_errors, xml_assets = await capture_svg_previews(page, page_dir)
+                            await page.evaluate("""() => {
+                                document.querySelectorAll('.td-content img').forEach(img => {
+                                    const src = img.currentSrc;
+                                    if (src && /^https?:\/\//.test(src))
+                                        img.setAttribute('data-archive-current-src', src);
+                                });
+                            }""")
                             annotated_dom = await page.content()
                             results[url] = {
                                 "success": True,
@@ -377,8 +384,10 @@ async def archive(args: argparse.Namespace) -> None:
             issues.append("browser_render_failed")
         if record["formula_capture_failures"]:
             issues.append("formula_screenshot_failed")
-        if record["svg_preview_failures"]:
-            issues.append("svg_visual_or_xml_capture_failed")
+        if any("error" in item for item in record["svg_preview_failures"]):
+            issues.append("svg_capture_failed")
+        if any("warning" in item for item in record["svg_preview_failures"]):
+            issues.append("svg_vector_repaired_or_rasterized")
         if rendered.get("success") and record.get("svg_count", 0) > record["svg_preview_count"]:
             issues.append("missing_svg_visual_preview")
         record["quality_issues"] = sorted(set(issues))

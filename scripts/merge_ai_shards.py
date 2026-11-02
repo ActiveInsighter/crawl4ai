@@ -103,6 +103,23 @@ def verify_page_integrity(record: dict, output_dir: Path) -> list[str]:
         stats.get("tex", 0) + stats.get("image", 0) + stats.get("unresolved", 0)
     ):
         issues.append("math_accounting_mismatch")
+    # SHA-256 of actual merged output supports reproducible downstream imports.
+    hashes = {}
+    for name in ("content.md", "content.html", "browser-rendered.html"):
+        path = page / name
+        if path.is_file():
+            hashes[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    assets = {}
+    asset_dir = page / "assets"
+    if asset_dir.is_dir():
+        for file in sorted(asset_dir.rglob("*")):
+            if file.is_file():
+                assets[file.relative_to(page).as_posix()] = {
+                    "sha256": hashlib.sha256(file.read_bytes()).hexdigest(),
+                    "bytes": file.stat().st_size,
+                }
+    record["content_sha256"] = hashes
+    record["asset_integrity"] = assets
     return sorted(set(issues))
 
 
