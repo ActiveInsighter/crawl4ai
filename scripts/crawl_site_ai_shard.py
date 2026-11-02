@@ -7,6 +7,7 @@ import argparse
 import asyncio
 import base64
 import json
+import struct
 import time
 from pathlib import Path
 import xml.etree.ElementTree as ET
@@ -152,20 +153,7 @@ async def capture_svg_previews(page, page_dir: Path) -> tuple[int, list[dict], l
         locator = page.locator('svg[data-archive-svg-shot-id="' + identifier + '"]').first
         preview_path = f"assets/svg-previews/figure-{identifier}.png"
         svg_path = f"assets/svg/figure-{identifier}.svg"
-        try:
-            # Live DOM -> XMLSerializer, not HTML parsing or string reconstruction.
-            xml = await locator.evaluate("(svg) => new XMLSerializer().serializeToString(svg)")
-            xml, dependencies = await _self_contained_svg(xml, page.url)
-            failures.extend({"svg_id": identifier, **item} for item in dependencies)
-            ET.fromstring(xml)
-            (page_dir / svg_path).write_text(xml, encoding="utf-8")
-            await locator.evaluate(
-                "(el, source) => el.setAttribute('data-archive-svg-serialized', source)",
-                svg_path,
-            )
-            xml_assets.append({"path": svg_path, "preview": preview_path})
-        except Exception as exc:
-            failures.append({"svg_id": identifier, "error": "SVG serialization: " + str(exc)})
+        screenshot_available = False
         try:
             await locator.screenshot(
                 path=str(page_dir / preview_path), animations="disabled", timeout=12_000,
@@ -175,8 +163,66 @@ async def capture_svg_previews(page, page_dir: Path) -> tuple[int, list[dict], l
                 preview_path,
             )
             previews += 1
+            screenshot_available = True
         except Exception as exc:
             failures.append({"svg_id": identifier, "error": "SVG preview: " + str(exc)})
+        try:
+            xml = await locator.evaluate("(svg) => new XMLSerializer().serializeToString(svg)")
+            repair_note = None
+            try:
+                ET.fromstring(xml)
+            except ET.ParseError as exc:
+                # foreignObject's permissive HTML parser may create illegal XML
+                # attribute names such as '#000000;'. Strip only invalid names
+                # from a clone; the exact browser DOM remains in the raw HTML.
+                repair_note = "invalid HTML attributes in foreignObject: " + str(exc)
+                try:
+                    repaired = await locator.evaluate(r"""svg => {
+                        const clone = svg.cloneNode(true);
+                        for (const node of clone.querySelectorAll('*')) {
+                            for (const attr of Array.from(node.attributes)) {
+                                if (!/^[A-Za-z_][A-Za-z0-9_.:-]*$/.test(attr.name)) {
+                                    node.removeAttribute(attr.name);
+                                }
+                            }
+                        }
+                        return new XMLSerializer().serializeToString(clone);
+                    }""")
+                    ET.fromstring(repaired)
+                    xml = repaired
+                except Exception as repair_error:
+                    # A valid XML wrapper around the actual screenshot preserves
+                    # the exact visual when the original vector cannot be saved.
+                    if not screenshot_available:
+                        raise RuntimeError("No XML-safe vector or preview image") from repair_error
+                    png = (page_dir / preview_path).read_bytes()
+                    if len(png) < 24 or not png.startswith(b"\x89PNG\r\n\x1a\n"):
+                        raise ValueError("Invalid PNG fallback")
+                    width, height = struct.unpack(">II", png[16:24])
+                    if not width or not height:
+                        raise ValueError("Empty SVG screenshot dimensions")
+                    image_data = base64.b64encode(png).decode("ascii")
+                    xml = (
+                        f'<svg xmlns="http://www.w3.org/2000/svg" '
+                        f'width="{width}" height="{height}" viewBox="0 0 {width} {height}">'
+                        f'<image width="{width}" height="{height}" '
+                        f'href="data:image/png;base64,{image_data}"/></svg>'
+                    )
+                    repair_note += "; raster-backed SVG visual fallback"
+            xml, dependencies = await _self_contained_svg(xml, page.url)
+            failures.extend({"svg_id": identifier, **item} for item in dependencies)
+            ET.fromstring(xml)
+            (page_dir / svg_path).write_text(xml, encoding="utf-8")
+            await locator.evaluate(
+                "(el, source) => el.setAttribute('data-archive-svg-serialized', source)",
+                svg_path,
+            )
+            xml_assets.append({"path": svg_path, "preview": preview_path,
+                               "repaired": bool(repair_note)})
+            if repair_note:
+                failures.append({"svg_id": identifier, "warning": repair_note})
+        except Exception as exc:
+            failures.append({"svg_id": identifier, "error": "SVG serialization: " + str(exc)})
         finally:
             await page.evaluate(
                 """id => { const svg = document.querySelector(
