@@ -348,12 +348,21 @@ def export_inline_svgs(article: Tag, output_dir: Path) -> tuple[list[dict[str, A
             svg.decompose()
             continue
         preview = text_value(svg.attrs.pop("data-archive-svg-preview", "")).strip()
-        restore_svg_case(svg)
+        serialized_source = text_value(svg.attrs.pop("data-archive-svg-serialized", "")).strip()
         index = len(manifest) + 1
         svg_dir = output_dir / "assets" / "svg"
         svg_dir.mkdir(parents=True, exist_ok=True)
         path = svg_dir / f"figure-{index:03d}.svg"
-        serialized = str(svg)
+        if serialized_source and serialized_source.startswith("assets/svg/") and ".." not in serialized_source:
+            source_path = output_dir / serialized_source
+            if not source_path.is_file():
+                raise ValueError(f"Missing browser-serialized SVG: {serialized_source}")
+            # XMLSerializer operated on the live SVG DOM, preserving complex XHTML
+            # foreignObject children which BeautifulSoup's HTML parser corrupts.
+            serialized = source_path.read_text(encoding="utf-8")
+        else:
+            restore_svg_case(svg)
+            serialized = str(svg)
         ET.fromstring(serialized)
         path.write_text(serialized, encoding="utf-8")
         relative = PurePosixPath("assets", "svg", path.name).as_posix()

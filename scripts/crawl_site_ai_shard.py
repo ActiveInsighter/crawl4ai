@@ -9,7 +9,8 @@ import base64
 import json
 import time
 from pathlib import Path
-from urllib.parse import urlsplit
+import xml.etree.ElementTree as ET
+from urllib.parse import urlsplit, urljoin
 
 import ai_archive_core as core
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
@@ -101,8 +102,34 @@ async def _remove_formula_marker(page, identifier: str) -> None:
     )
 
 
-async def capture_svg_previews(page, page_dir: Path) -> tuple[int, list[dict]]:
-    """Keep browser-faithful PNG copies alongside editable standalone SVG."""
+async def _self_contained_svg(xml: str, base_url: str) -> tuple[str, list[dict]]:
+    """Inline network <image> dependencies in browser-serialized XML."""
+    root = ET.fromstring(xml)
+    failures = []
+    changed = False
+    for node in root.iter():
+        if node.tag.split("}")[-1] != "image":
+            continue
+        for attr, value in list(node.attrib.items()):
+            if attr.split("}")[-1] != "href" or value.startswith(("#", "data:")):
+                continue
+            absolute = urljoin(base_url, value)
+            try:
+                payload, mime = await asyncio.to_thread(core.fetch_binary, absolute, base_url)
+                mime = mime.split(";", 1)[0].strip().lower()
+                if not payload or not mime.startswith("image/"):
+                    raise ValueError("empty or invalid SVG image resource")
+                if mime == "image/svg+xml":
+                    ET.fromstring(payload)
+                node.set(attr, "data:" + mime + ";base64," + base64.b64encode(payload).decode("ascii"))
+                changed = True
+            except Exception as exc:
+                failures.append({"url": absolute, "error": str(exc)})
+    return (ET.tostring(root, encoding="unicode") if changed else xml), failures
+
+
+async def capture_svg_previews(page, page_dir: Path) -> tuple[int, list[dict], list[dict]]:
+    """Save a DOM-serialized XML SVG and a live-browser screenshot per diagram."""
     ids = await page.evaluate(r"""() => {
         const nodes = document.querySelectorAll('.td-content svg');
         const ids = [];
@@ -118,24 +145,38 @@ async def capture_svg_previews(page, page_dir: Path) -> tuple[int, list[dict]]:
         }
         return ids;
     }""")
-    previews = 0
-    errors = []
-    folder = page_dir / "assets" / "svg-previews"
-    folder.mkdir(parents=True, exist_ok=True)
+    previews, failures, xml_assets = 0, [], []
+    (page_dir / "assets" / "svg-previews").mkdir(parents=True, exist_ok=True)
+    (page_dir / "assets" / "svg").mkdir(parents=True, exist_ok=True)
     for identifier in ids:
         locator = page.locator('svg[data-archive-svg-shot-id="' + identifier + '"]').first
-        relative = f"assets/svg-previews/figure-{identifier}.png"
+        preview_path = f"assets/svg-previews/figure-{identifier}.png"
+        svg_path = f"assets/svg/figure-{identifier}.svg"
+        try:
+            # Live DOM -> XMLSerializer, not HTML parsing or string reconstruction.
+            xml = await locator.evaluate("(svg) => new XMLSerializer().serializeToString(svg)")
+            xml, dependencies = await _self_contained_svg(xml, page.url)
+            failures.extend({"svg_id": identifier, **item} for item in dependencies)
+            ET.fromstring(xml)
+            (page_dir / svg_path).write_text(xml, encoding="utf-8")
+            await locator.evaluate(
+                "(el, source) => el.setAttribute('data-archive-svg-serialized', source)",
+                svg_path,
+            )
+            xml_assets.append({"path": svg_path, "preview": preview_path})
+        except Exception as exc:
+            failures.append({"svg_id": identifier, "error": "SVG serialization: " + str(exc)})
         try:
             await locator.screenshot(
-                path=str(page_dir / relative), animations="disabled", timeout=12_000,
+                path=str(page_dir / preview_path), animations="disabled", timeout=12_000,
             )
             await locator.evaluate(
                 "(el, path) => el.setAttribute('data-archive-svg-preview', path)",
-                relative,
+                preview_path,
             )
             previews += 1
         except Exception as exc:
-            errors.append({"svg_id": identifier, "error": str(exc)})
+            failures.append({"svg_id": identifier, "error": "SVG preview: " + str(exc)})
         finally:
             await page.evaluate(
                 """id => { const svg = document.querySelector(
@@ -143,7 +184,7 @@ async def capture_svg_previews(page, page_dir: Path) -> tuple[int, list[dict]]:
                     if (svg) svg.removeAttribute('data-archive-svg-shot-id'); }""",
                 identifier,
             )
-    return previews, errors
+    return previews, failures, xml_assets
 
 
 async def render_pages(
@@ -184,7 +225,7 @@ async def render_pages(
                             page_dir.mkdir(parents=True, exist_ok=True)
                             (page_dir / "browser-rendered.html").write_text(original_dom, encoding="utf-8")
                             capture_count, capture_errors = await capture_unrecoverable_math(page, page_dir)
-                            svg_preview_count, svg_preview_errors = await capture_svg_previews(page, page_dir)
+                            svg_preview_count, svg_preview_errors, xml_assets = await capture_svg_previews(page, page_dir)
                             annotated_dom = await page.content()
                             results[url] = {
                                 "success": True,
@@ -196,6 +237,7 @@ async def render_pages(
                                 "formula_capture_failures": capture_errors,
                                 "svg_preview_count": svg_preview_count,
                                 "svg_preview_failures": svg_preview_errors,
+                                "svg_xml_assets": xml_assets,
                                 "elapsed_seconds": round(time.perf_counter() - started, 3),
                             }
                             print(
@@ -281,6 +323,7 @@ async def archive(args: argparse.Namespace) -> None:
         record["formula_capture_failures"] = rendered.get("formula_capture_failures", [])
         record["svg_preview_count"] = rendered.get("svg_preview_count", 0)
         record["svg_preview_failures"] = rendered.get("svg_preview_failures", [])
+        record["browser_svg_xml_assets"] = rendered.get("svg_xml_assets", [])
         issues = list(record.get("quality_issues", []))
         if not record.get("success"):
             issues.append("page_extract_failed")
@@ -289,7 +332,7 @@ async def archive(args: argparse.Namespace) -> None:
         if record["formula_capture_failures"]:
             issues.append("formula_screenshot_failed")
         if record["svg_preview_failures"]:
-            issues.append("svg_preview_failed")
+            issues.append("svg_visual_or_xml_capture_failed")
         if rendered.get("success") and record.get("svg_count", 0) > record["svg_preview_count"]:
             issues.append("missing_svg_visual_preview")
         record["quality_issues"] = sorted(set(issues))
