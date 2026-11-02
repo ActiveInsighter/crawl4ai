@@ -23,7 +23,10 @@ CORE_LABELS = {
     "operating_system": "操作系统",
     "computer_network": "计算机网络",
 }
-SKIP_RE = re.compile(r"(?:^|/)(?:404(?:\.html)?|search|tags?|categories?|authors?)(?:/|$)", re.I)
+SKIP_RE = re.compile(r"(?:^|/)(?:404(?:\.html)?|tags?|categories?|authors?)(?:/|$)", re.I)
+# Root site search is not a document, but courses such as
+# /data_structure/search/ are legitimate exam chapters.
+ROOT_SEARCH_RE = re.compile(r"^/search(?:/|$|\.html?$)", re.I)
 NON_DOCUMENT_SUFFIXES = {
     ".7z", ".avi", ".avif", ".bin", ".bmp", ".css", ".csv", ".doc", ".docx",
     ".eot", ".epub", ".gif", ".gz", ".ico", ".jpeg", ".jpg", ".js", ".json",
@@ -51,7 +54,7 @@ def canonicalize(url: str, base_url: str) -> str | None:
         return None
     if suffix and suffix not in {".html", ".htm"}:
         return None
-    if SKIP_RE.search(path.strip("/")):
+    if SKIP_RE.search(path.strip("/")) or ROOT_SEARCH_RE.search(path):
         return None
     return urlunsplit((base.scheme, base.netloc, path, "", ""))
 
