@@ -7,7 +7,7 @@ import json
 import shutil
 from pathlib import Path
 
-import fitz
+import pymupdf as fitz
 from render_408_pdf_shard import SUBJECTS, inspect_pdf, relative_pdf
 
 
