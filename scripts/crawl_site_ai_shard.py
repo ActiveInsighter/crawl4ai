@@ -347,9 +347,18 @@ async def render_pages(
                             response = await page.goto(url, wait_until="commit", timeout=min(timeout_ms, 45_000))
                             if response is None or response.status >= 400:
                                 raise RuntimeError(f"HTTP {response.status if response else 'no response'}")
-                            await page.wait_for_selector(".td-content", state="attached", timeout=20_000)
+                            # Category indexes and home pages may have no Docsy .td-content.
+                            # A browser-rendered page need not contain that exact selector.
+                            await page.wait_for_selector(
+                                ".td-content, main article, article, [role='main'], main, body",
+                                state="attached", timeout=20_000,
+                            )
                             await page.wait_for_function(
                                 "() => document.readyState !== 'loading'", timeout=15_000,
+                            )
+                            await page.wait_for_function(
+                                "() => Boolean(document.body && document.body.innerText.trim().length > 20)",
+                                timeout=15_000,
                             )
                             await page.wait_for_timeout(650)
                             original_dom = await page.content()
