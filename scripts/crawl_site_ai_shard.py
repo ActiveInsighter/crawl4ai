@@ -35,6 +35,71 @@ def merge_navigation_sections(target: dict[str, dict], items: list[dict]) -> Non
             target[key] = item
 
 
+async def screenshot_dom_without_font_wait(page, locator, target_path: Path) -> None:
+    """Capture the actual DOM rendering via Chrome DevTools, bypassing Playwright's
+    indefinite fonts.ready wait. Clone into a temporary visible container, so
+    formulas in collapsed panels can still be preserved without editing source.
+    """
+    marker = "c4a-fidelity-capture-overlay"
+    details = await locator.evaluate(r"""(node) => {
+        const existing = document.getElementById('c4a-fidelity-capture-overlay');
+        if (existing) existing.remove();
+        window.scrollTo(0, 0);
+        const box = node.getBoundingClientRect();
+        const view = node.viewBox?.baseVal;
+        const width = Math.min(2200, Math.max(40, Math.ceil(box.width || view?.width || 800)));
+        const height = Math.min(2800, Math.max(30, Math.ceil(box.height || view?.height || 120)));
+        const overlay = document.createElement('div');
+        overlay.id = 'c4a-fidelity-capture-overlay';
+        overlay.style.cssText = 'position:absolute;left:0;top:0;z-index:2147483647;' +
+            'background:white;pointer-events:none;overflow:hidden;box-sizing:border-box;';
+        overlay.style.width = width + 'px';
+        overlay.style.height = height + 'px';
+        const cloned = node.cloneNode(true);
+        cloned.removeAttribute('data-archive-formula-shot-id');
+        cloned.removeAttribute('data-archive-svg-shot-id');
+        const originalStyle = getComputedStyle(node);
+        overlay.style.fontFamily = originalStyle.fontFamily;
+        overlay.style.fontSize = originalStyle.fontSize;
+        overlay.style.color = originalStyle.color;
+        cloned.style.visibility = 'visible';
+        cloned.style.display = 'block';
+        cloned.style.opacity = '1';
+        if (cloned.tagName.toLowerCase() === 'svg') {
+            cloned.setAttribute('width', String(width));
+            cloned.setAttribute('height', String(height));
+        }
+        overlay.appendChild(cloned);
+        document.body.appendChild(overlay);
+        return {width, height};
+    }""")
+    session = None
+    try:
+        session = await page.context.new_cdp_session(page)
+        image = await session.send("Page.captureScreenshot", {
+            "format": "png",
+            "fromSurface": True,
+            "captureBeyondViewport": True,
+            "clip": {
+                "x": 0, "y": 0,
+                "width": details["width"],
+                "height": details["height"],
+                "scale": 1,
+            },
+        })
+        payload = base64.b64decode(image["data"])
+        if not payload.startswith(b"\x89PNG\r\n\x1a\n") or len(payload) < 24:
+            raise ValueError("CDP failed to capture a valid PNG")
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_bytes(payload)
+    finally:
+        if session:
+            await session.detach()
+        await page.evaluate("""id => {
+            document.getElementById(id)?.remove();
+        }""", marker)
+
+
 async def capture_unrecoverable_math(page, page_dir: Path) -> tuple[int, list[dict]]:
     """Use lossless PNG screenshots only when no authoritative TeX is available.
 
@@ -78,11 +143,7 @@ async def capture_unrecoverable_math(page, page_dir: Path) -> tuple[int, list[di
         locator = page.locator('[data-archive-formula-shot-id="' + identifier + '"]').first
         relative = f"assets/formulas/formula-{identifier}.png"
         try:
-            await locator.screenshot(
-                path=str(page_dir / relative),
-                animations="disabled",
-                timeout=15_000,
-            )
+            await screenshot_dom_without_font_wait(page, locator, page_dir / relative)
             await locator.evaluate(
                 "(el, relative) => el.setAttribute('data-archive-formula-image', relative)",
                 relative,
@@ -155,9 +216,7 @@ async def capture_svg_previews(page, page_dir: Path) -> tuple[int, list[dict], l
         svg_path = f"assets/svg/figure-{identifier}.svg"
         screenshot_available = False
         try:
-            await locator.screenshot(
-                path=str(page_dir / preview_path), animations="disabled", timeout=12_000,
-            )
+            await screenshot_dom_without_font_wait(page, locator, page_dir / preview_path)
             await locator.evaluate(
                 "(el, path) => el.setAttribute('data-archive-svg-preview', path)",
                 preview_path,
@@ -177,38 +236,65 @@ async def capture_svg_previews(page, page_dir: Path) -> tuple[int, list[dict], l
                 # from a clone; the exact browser DOM remains in the raw HTML.
                 repair_note = "invalid HTML attributes in foreignObject: " + str(exc)
                 try:
+                    # Many draw.io exports contain a malformed XHTML
+                    # foreignObject plus a *native* base64 image in <switch>.
+                    # Keep every vector path and use that original embedded
+                    # fallback image instead of rasterizing the entire SVG.
                     repaired = await locator.evaluate(r"""svg => {
                         const clone = svg.cloneNode(true);
-                        for (const node of clone.querySelectorAll('*')) {
-                            for (const attr of Array.from(node.attributes)) {
-                                if (!/^[A-Za-z_][A-Za-z0-9_.:-]*$/.test(attr.name)) {
-                                    node.removeAttribute(attr.name);
-                                }
+                        let dropped = 0;
+                        for (const node of Array.from(clone.querySelectorAll('foreignObject'))) {
+                            const parent = node.parentElement;
+                            if (parent?.localName !== 'switch') continue;
+                            const fallback = Array.from(parent.children).some(
+                                child => child !== node &&
+                                ['image', 'text', 'g'].includes(child.localName)
+                            );
+                            if (fallback) {
+                                node.remove();
+                                dropped++;
                             }
                         }
+                        if (!dropped) throw new Error('no native SVG switch fallback');
                         return new XMLSerializer().serializeToString(clone);
                     }""")
                     ET.fromstring(repaired)
                     xml = repaired
-                except Exception as repair_error:
-                    # A valid XML wrapper around the actual screenshot preserves
-                    # the exact visual when the original vector cannot be saved.
-                    if not screenshot_available:
-                        raise RuntimeError("No XML-safe vector or preview image") from repair_error
-                    png = (page_dir / preview_path).read_bytes()
-                    if len(png) < 24 or not png.startswith(b"\x89PNG\r\n\x1a\n"):
-                        raise ValueError("Invalid PNG fallback")
-                    width, height = struct.unpack(">II", png[16:24])
-                    if not width or not height:
-                        raise ValueError("Empty SVG screenshot dimensions")
-                    image_data = base64.b64encode(png).decode("ascii")
-                    xml = (
-                        f'<svg xmlns="http://www.w3.org/2000/svg" '
-                        f'width="{width}" height="{height}" viewBox="0 0 {width} {height}">'
-                        f'<image width="{width}" height="{height}" '
-                        f'href="data:image/png;base64,{image_data}"/></svg>'
-                    )
-                    repair_note += "; raster-backed SVG visual fallback"
+                    repair_note = "malformed XHTML replaced with original embedded SVG switch fallback"
+                except Exception:
+                    try:
+                        repaired = await locator.evaluate(r"""svg => {
+                            const clone = svg.cloneNode(true);
+                            for (const node of clone.querySelectorAll('*')) {
+                                for (const attr of Array.from(node.attributes)) {
+                                    if (!/^[A-Za-z_][A-Za-z0-9_.:-]*$/.test(attr.name)) {
+                                        node.removeAttribute(attr.name);
+                                    }
+                                }
+                            }
+                            return new XMLSerializer().serializeToString(clone);
+                        }""")
+                        ET.fromstring(repaired)
+                        xml = repaired
+                    except Exception as repair_error:
+                        # A valid XML wrapper around the actual screenshot preserves
+                        # the exact visual when the original vector cannot be saved.
+                        if not screenshot_available:
+                            raise RuntimeError("No XML-safe vector or preview image") from repair_error
+                        png = (page_dir / preview_path).read_bytes()
+                        if len(png) < 24 or not png.startswith(b"\x89PNG\r\n\x1a\n"):
+                            raise ValueError("Invalid PNG fallback")
+                        width, height = struct.unpack(">II", png[16:24])
+                        if not width or not height:
+                            raise ValueError("Empty SVG screenshot dimensions")
+                        image_data = base64.b64encode(png).decode("ascii")
+                        xml = (
+                            f'<svg xmlns="http://www.w3.org/2000/svg" '
+                            f'width="{width}" height="{height}" viewBox="0 0 {width} {height}">'
+                            f'<image width="{width}" height="{height}" '
+                            f'href="data:image/png;base64,{image_data}"/></svg>'
+                        )
+                        repair_note += "; raster-backed SVG visual fallback"
             xml, dependencies = await _self_contained_svg(xml, page.url)
             failures.extend({"svg_id": identifier, **item} for item in dependencies)
             ET.fromstring(xml)
