@@ -35,6 +35,71 @@ def merge_navigation_sections(target: dict[str, dict], items: list[dict]) -> Non
             target[key] = item
 
 
+async def screenshot_dom_without_font_wait(page, locator, target_path: Path) -> None:
+    """Capture the actual DOM rendering via Chrome DevTools, bypassing Playwright's
+    indefinite fonts.ready wait. Clone into a temporary visible container, so
+    formulas in collapsed panels can still be preserved without editing source.
+    """
+    marker = "c4a-fidelity-capture-overlay"
+    details = await locator.evaluate(r"""(node) => {
+        const existing = document.getElementById('c4a-fidelity-capture-overlay');
+        if (existing) existing.remove();
+        window.scrollTo(0, 0);
+        const box = node.getBoundingClientRect();
+        const view = node.viewBox?.baseVal;
+        const width = Math.min(2200, Math.max(40, Math.ceil(box.width || view?.width || 800)));
+        const height = Math.min(2800, Math.max(30, Math.ceil(box.height || view?.height || 120)));
+        const overlay = document.createElement('div');
+        overlay.id = 'c4a-fidelity-capture-overlay';
+        overlay.style.cssText = 'position:absolute;left:0;top:0;z-index:2147483647;' +
+            'background:white;pointer-events:none;overflow:hidden;box-sizing:border-box;';
+        overlay.style.width = width + 'px';
+        overlay.style.height = height + 'px';
+        const cloned = node.cloneNode(true);
+        cloned.removeAttribute('data-archive-formula-shot-id');
+        cloned.removeAttribute('data-archive-svg-shot-id');
+        const originalStyle = getComputedStyle(node);
+        overlay.style.fontFamily = originalStyle.fontFamily;
+        overlay.style.fontSize = originalStyle.fontSize;
+        overlay.style.color = originalStyle.color;
+        cloned.style.visibility = 'visible';
+        cloned.style.display = 'block';
+        cloned.style.opacity = '1';
+        if (cloned.tagName.toLowerCase() === 'svg') {
+            cloned.setAttribute('width', String(width));
+            cloned.setAttribute('height', String(height));
+        }
+        overlay.appendChild(cloned);
+        document.body.appendChild(overlay);
+        return {width, height};
+    }""")
+    session = None
+    try:
+        session = await page.context.new_cdp_session(page)
+        image = await session.send("Page.captureScreenshot", {
+            "format": "png",
+            "fromSurface": True,
+            "captureBeyondViewport": True,
+            "clip": {
+                "x": 0, "y": 0,
+                "width": details["width"],
+                "height": details["height"],
+                "scale": 1,
+            },
+        })
+        payload = base64.b64decode(image["data"])
+        if not payload.startswith(b"\x89PNG\r\n\x1a\n") or len(payload) < 24:
+            raise ValueError("CDP failed to capture a valid PNG")
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_bytes(payload)
+    finally:
+        if session:
+            await session.detach()
+        await page.evaluate("""id => {
+            document.getElementById(id)?.remove();
+        }""", marker)
+
+
 async def capture_unrecoverable_math(page, page_dir: Path) -> tuple[int, list[dict]]:
     """Use lossless PNG screenshots only when no authoritative TeX is available.
 
@@ -78,11 +143,7 @@ async def capture_unrecoverable_math(page, page_dir: Path) -> tuple[int, list[di
         locator = page.locator('[data-archive-formula-shot-id="' + identifier + '"]').first
         relative = f"assets/formulas/formula-{identifier}.png"
         try:
-            await locator.screenshot(
-                path=str(page_dir / relative),
-                animations="disabled",
-                timeout=15_000,
-            )
+            await screenshot_dom_without_font_wait(page, locator, page_dir / relative)
             await locator.evaluate(
                 "(el, relative) => el.setAttribute('data-archive-formula-image', relative)",
                 relative,
@@ -155,9 +216,7 @@ async def capture_svg_previews(page, page_dir: Path) -> tuple[int, list[dict], l
         svg_path = f"assets/svg/figure-{identifier}.svg"
         screenshot_available = False
         try:
-            await locator.screenshot(
-                path=str(page_dir / preview_path), animations="disabled", timeout=12_000,
-            )
+            await screenshot_dom_without_font_wait(page, locator, page_dir / preview_path)
             await locator.evaluate(
                 "(el, path) => el.setAttribute('data-archive-svg-preview', path)",
                 preview_path,
