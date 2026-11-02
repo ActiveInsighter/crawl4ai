@@ -353,9 +353,9 @@ async def render_pages(
                                 ".td-content, main article, article, [role='main'], main, body",
                                 state="attached", timeout=20_000,
                             )
-                            await page.wait_for_function(
-                                "() => document.readyState !== 'loading'", timeout=15_000,
-                            )
+                            # document.readyState may stay "loading" indefinitely
+                            # when ads/assets stall. Check real article text instead:
+                            # it is the actual content required for an archive.
                             await page.wait_for_function(
                                 "() => Boolean(document.body && document.body.innerText.trim().length > 20)",
                                 timeout=15_000,
