@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
-import fitz
+import pymupdf as fitz
 from playwright.async_api import async_playwright
 
 SUBJECTS = {
