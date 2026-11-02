@@ -148,21 +148,34 @@ async def stabilize(page) -> dict:
     except Exception:
         pass
     await page.wait_for_timeout(3000)
-    await page.wait_for_function(
-        """() => {
-            const node = document.querySelector('.td-content');
-            if (!node) return false;
-            const n = (node.innerText || '').trim().length;
-            if (n < 80) return false;
-            const now = Date.now(), old = window.__pdfStable;
-            if (!old || old.n !== n) {
-                window.__pdfStable = {n, time: now};
-                return false;
-            }
-            return now - old.time >= 1400;
-        }""",
-        polling=250, timeout=35000,
-    )
+    try:
+        await page.wait_for_function(
+            """() => {
+                const node = document.querySelector('.td-content');
+                if (!node) return false;
+                const n = (node.innerText || '').trim().length;
+                if (n < 80) return false;
+                const now = Date.now(), old = window.__pdfStable;
+                if (!old || old.n !== n) {
+                    window.__pdfStable = {n, time: now};
+                    return false;
+                }
+                return now - old.time >= 1400;
+            }""",
+            polling=250, timeout=35000,
+        )
+    except Exception:
+        # The website may continuously edit the rendered article (e.g. course
+        # widgets), preventing a 1.4s text plateau even though article content
+        # is present. Do not discard such a source page. Require a substantive
+        # article and keep waiting before producing its PDF.
+        available = await page.evaluate(
+            "() => (document.querySelector('.td-content')?.innerText || '').trim().length"
+        )
+        if available < 350:
+            raise RuntimeError(f"Article never stabilized and is too short: {available} chars")
+        print(f"[PDF WARN] Non-stable DOM, rendering available {available} chars", flush=True)
+        await page.wait_for_timeout(4000)
     # Expand the actual on-page content before printing. Do not parse or
     # rewrite its SVG and math. Opening HTML details reveals hidden notes.
     await page.evaluate("""() => {
