@@ -33,15 +33,83 @@ def merge_navigation_sections(target: dict[str, dict], items: list[dict]) -> Non
             target[key] = item
 
 
+async def capture_unrecoverable_math(page, page_dir: Path) -> tuple[int, list[dict]]:
+    """Use lossless PNG screenshots only when no authoritative TeX is available.
+
+    Capture from the live page before changing the formula node; never infer LaTeX
+    from a visually rendered expression or an adjacent formula.
+    """
+    targets = await page.evaluate(r"""() => {
+        const candidates = document.querySelectorAll(
+            '.td-content .katex, .td-content mjx-container, .td-content math'
+        );
+        const seen = new Set();
+        const ids = [];
+        for (const node of candidates) {
+            if (node.tagName.toLowerCase() === 'math' &&
+                (node.closest('.katex') || node.closest('mjx-container'))) continue;
+            const target = node.closest('.katex-display') || node;
+            if (seen.has(target)) continue;
+            seen.add(target);
+            const annotation = target.querySelector('annotation[encoding="application/x-tex"]');
+            let known = Boolean(annotation && annotation.textContent.trim());
+            if (!known) {
+                for (const element of [target, node]) {
+                    if (['data-tex', 'data-latex', 'data-math', 'alttext'].some(
+                        key => Boolean(element.getAttribute(key)))) known = true;
+                    if (element.querySelector('script[type^="math/tex"]')) known = true;
+                }
+            }
+            if (!known) {
+                const id = String(ids.length + 1).padStart(4, '0');
+                target.setAttribute('data-archive-formula-shot-id', id);
+                ids.push(id);
+            }
+        }
+        return ids;
+    }""")
+    failures = []
+    count = 0
+    destination = page_dir / "assets" / "formulas"
+    destination.mkdir(parents=True, exist_ok=True)
+    for identifier in targets:
+        locator = page.locator('[data-archive-formula-shot-id="' + identifier + '"]').first
+        relative = f"assets/formulas/formula-{identifier}.png"
+        try:
+            await locator.screenshot(
+                path=str(page_dir / relative),
+                animations="disabled",
+                timeout=15_000,
+            )
+            await locator.evaluate(
+                "(el, relative) => el.setAttribute('data-archive-formula-image', relative)",
+                relative,
+            )
+            count += 1
+        except Exception as exc:
+            failures.append({"formula_id": identifier, "error": str(exc)})
+        finally:
+            await _remove_formula_marker(page, identifier)
+    return count, failures
+
+
+async def _remove_formula_marker(page, identifier: str) -> None:
+    await page.evaluate(
+        """id => { const el = document.querySelector('[data-archive-formula-shot-id="' + id + '"]');
+            if (el) el.removeAttribute('data-archive-formula-shot-id'); }""",
+        identifier,
+    )
+
+
 async def render_pages(
     urls: list[str],
     root: Path,
     concurrency: int,
     timeout_ms: int,
 ) -> dict[str, dict]:
-    """Render every URL in Chromium and persist the exact post-render DOM."""
+    """Capture source DOM, annotated DOM and missing-math screenshots with retry."""
     results: dict[str, dict] = {}
-    semaphore = asyncio.Semaphore(concurrency)
+    semaphore = asyncio.Semaphore(max(1, concurrency))
 
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(
@@ -52,57 +120,58 @@ async def render_pages(
         async def render_one(index: int, url: str) -> None:
             async with semaphore:
                 started = time.perf_counter()
-                page = await browser.new_page(viewport={"width": 1440, "height": 1000})
+                page = await browser.new_page(viewport={"width": 1440, "height": 1000}, device_scale_factor=2)
+                error = None
                 try:
-                    response = await page.goto(
-                        url,
-                        wait_until="domcontentloaded",
-                        timeout=timeout_ms,
-                    )
-                    try:
-                        await page.wait_for_load_state("networkidle", timeout=10_000)
-                    except PlaywrightTimeoutError:
-                        pass
-                    await page.wait_for_timeout(500)
-
-                    rendered_html = await page.content()
-                    resolved_url = page.url or url
-                    page_dir = core.output_dir_for_url(url, root)
-                    page_dir.mkdir(parents=True, exist_ok=True)
-                    (page_dir / "browser-rendered.html").write_text(
-                        rendered_html,
-                        encoding="utf-8",
-                    )
-                    results[url] = {
-                        "success": True,
-                        "html": rendered_html,
-                        "resolved_url": resolved_url,
-                        "status_code": response.status if response else None,
-                        "html_chars": len(rendered_html),
-                        "elapsed_seconds": round(time.perf_counter() - started, 3),
-                    }
-                    print(
-                        f"[RENDER {index:03d}/{len(urls):03d}] ✓ "
-                        f"{results[url]['elapsed_seconds']}s html={len(rendered_html)} {url}",
-                        flush=True,
-                    )
-                except Exception as exc:
-                    results[url] = {
-                        "success": False,
-                        "error": str(exc),
-                        "resolved_url": page.url or url,
-                        "elapsed_seconds": round(time.perf_counter() - started, 3),
-                    }
-                    print(
-                        f"[RENDER {index:03d}/{len(urls):03d}] ✗ {url} — {exc}",
-                        flush=True,
-                    )
+                    for attempt in range(3):
+                        try:
+                            # 'commit' avoids waiting for enormous pages to load every asset.
+                            response = await page.goto(url, wait_until="commit", timeout=min(timeout_ms, 45_000))
+                            if response is None or response.status >= 400:
+                                raise RuntimeError(f"HTTP {response.status if response else 'no response'}")
+                            await page.wait_for_selector(".td-content", state="attached", timeout=20_000)
+                            await page.wait_for_function(
+                                "() => document.readyState !== 'loading'", timeout=15_000,
+                            )
+                            await page.wait_for_timeout(650)
+                            original_dom = await page.content()
+                            page_dir = core.output_dir_for_url(url, root)
+                            page_dir.mkdir(parents=True, exist_ok=True)
+                            (page_dir / "browser-rendered.html").write_text(original_dom, encoding="utf-8")
+                            capture_count, capture_errors = await capture_unrecoverable_math(page, page_dir)
+                            annotated_dom = await page.content()
+                            results[url] = {
+                                "success": True,
+                                "html": annotated_dom,
+                                "resolved_url": page.url or url,
+                                "status_code": response.status,
+                                "html_chars": len(annotated_dom),
+                                "formula_images": capture_count,
+                                "formula_capture_failures": capture_errors,
+                                "elapsed_seconds": round(time.perf_counter() - started, 3),
+                            }
+                            print(
+                                f"[RENDER {index:03d}/{len(urls):03d}] ✓ "
+                                f"html={len(annotated_dom)} formulas={capture_count} {url}", flush=True,
+                            )
+                            break
+                        except Exception as exc:
+                            error = exc
+                            if attempt < 2:
+                                await asyncio.sleep(1 + attempt * 2)
+                    else:
+                        results[url] = {
+                            "success": False,
+                            "error": str(error),
+                            "resolved_url": page.url or url,
+                            "elapsed_seconds": round(time.perf_counter() - started, 3),
+                        }
+                        print(f"[RENDER {index:03d}/{len(urls):03d}] ✗ {url}: {error}", flush=True)
                 finally:
                     await page.close()
 
-        await asyncio.gather(*(render_one(i, url) for i, url in enumerate(urls, start=1)))
+        await asyncio.gather(*(render_one(i, url) for i, url in enumerate(urls, 1)))
         await browser.close()
-
     return results
 
 
@@ -144,12 +213,15 @@ async def archive(args: argparse.Namespace) -> None:
     async def run_one(index: int, url: str) -> dict:
         page_started = time.perf_counter()
         async with semaphore:
-            record, navigation = await core.process_page(
-                url,
-                root,
-                article_selector=args.article_selector,
-                retries=args.retries,
-            )
+            try:
+                record, navigation = await core.process_page(
+                    url,
+                    root,
+                    article_selector=args.article_selector,
+                    retries=args.retries,
+                )
+            except Exception as exc:
+                record, navigation = {"url": url, "success": False, "error": str(exc)}, []
         rendered = rendered_pages.get(url, {})
         record["browser_rendered"] = bool(rendered.get("success"))
         record["browser_status_code"] = rendered.get("status_code")
@@ -157,6 +229,17 @@ async def archive(args: argparse.Namespace) -> None:
         record["browser_render_seconds"] = rendered.get("elapsed_seconds")
         if not rendered.get("success"):
             record["browser_render_error"] = rendered.get("error", "render failed")
+        record["formula_images"] = rendered.get("formula_images", 0)
+        record["formula_capture_failures"] = rendered.get("formula_capture_failures", [])
+        issues = list(record.get("quality_issues", []))
+        if not record.get("success"):
+            issues.append("page_extract_failed")
+        if not rendered.get("success"):
+            issues.append("browser_render_failed")
+        if record["formula_capture_failures"]:
+            issues.append("formula_screenshot_failed")
+        record["quality_issues"] = sorted(set(issues))
+        record["quality_pass"] = not issues
 
         counters["done"] += 1
         merge_navigation_sections(nav_sections, navigation)
@@ -191,6 +274,8 @@ async def archive(args: argparse.Namespace) -> None:
         "page_count": len(records),
         "success_count": sum(1 for item in records if item.get("success")),
         "failure_count": sum(1 for item in records if not item.get("success")),
+        "quality_pass_count": sum(1 for item in records if item.get("quality_pass")),
+        "quality_issue_count": sum(1 for item in records if not item.get("quality_pass")),
         "browser_render_success_count": len(records) - render_failures,
         "browser_render_failure_count": render_failures,
         "elapsed_seconds": round(time.perf_counter() - started, 3),
@@ -218,9 +303,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--shard-name", required=True)
     parser.add_argument("--output-dir", type=Path, default=Path("artifacts/site"))
     parser.add_argument("--article-selector", default=".td-content")
-    parser.add_argument("--concurrency", type=int, default=10)
-    parser.add_argument("--render-concurrency", type=int, default=4)
-    parser.add_argument("--render-timeout-ms", type=int, default=120_000)
+    parser.add_argument("--concurrency", type=int, default=4)
+    parser.add_argument("--render-concurrency", type=int, default=2)
+    parser.add_argument("--render-timeout-ms", type=int, default=45_000)
     parser.add_argument("--retries", type=int, default=2)
     return parser.parse_args()
 
