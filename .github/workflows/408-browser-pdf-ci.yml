@@ -1,0 +1,94 @@
+name: 408 browser-PDF fidelity smoke
+on:
+  push:
+    branches:
+      - codex/408-browser-pdf-only-20261102
+    paths:
+      - 'scripts/render_408_pdf_shard.py'
+      - 'scripts/merge_408_pdf_shards.py'
+      - 'tests/test_408_pdf.py'
+      - 'requirements-pdf.txt'
+      - '.github/workflows/408-browser-pdf-ci.yml'
+  pull_request:
+    paths:
+      - 'scripts/render_408_pdf_shard.py'
+      - 'scripts/merge_408_pdf_shards.py'
+      - 'tests/test_408_pdf.py'
+      - '.github/workflows/408-browser-pdf-ci.yml'
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r requirements-pdf.txt
+      - run: python -m compileall -q scripts tests
+      - run: python -m unittest tests.test_408_pdf tests.test_shard_plan -v
+
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: |
+          pip install -r requirements-pdf.txt
+          python -m playwright install --with-deps chromium
+          sudo apt-get install -y fonts-noto-cjk
+      - name: Print five historically problematic 408 knowledge pages
+        run: |
+          python - <<'PY'
+          import json, base64
+          from pathlib import Path
+          urls = [
+              'https://csgraduates.com/data_structure/graph/defs/',
+              'https://csgraduates.com/data_structure/tree/btree/',
+              'https://csgraduates.com/constitution_principle/storage/cache/',
+              'https://csgraduates.com/operating_system/memory/management/',
+              'https://csgraduates.com/computer_network/network/ip/',
+          ]
+          Path('urls.txt').write_text(base64.urlsafe_b64encode(
+              json.dumps(urls).encode()).decode())
+          PY
+          python scripts/render_408_pdf_shard.py \
+            --urls-b64 "$(cat urls.txt)" \
+            --shard-name '408 PDF visual smoke' \
+            --output-dir artifacts/pdf \
+            --concurrency 2 --retries 1
+      - name: Inspect PDF completeness and render visual sample pages
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          import fitz
+          root=Path('artifacts/pdf')
+          data=json.loads((root/'shard-manifest.json').read_text())
+          for item in data['pages']:
+              print(item['url'], item.get('success'), item.get('pdf_pages'),
+                    'chars', item.get('pdf_text_chars'), 'warnings', item.get('warnings'),
+                    'error', item.get('error'))
+          if data['page_count'] != 5 or data['success_count'] != 5:
+              raise SystemExit('Not all five source PDFs were generated.')
+          dest = root/'previews'
+          dest.mkdir(exist_ok=True)
+          for i, record in enumerate(data['pages']):
+              with fitz.open(root/record['pdf']) as pdf:
+                  if record['pdf_text_chars'] < 60: raise SystemExit('PDF text absent')
+                  for page_index in sorted({0, pdf.page_count//2, pdf.page_count-1}):
+                      page=pdf.load_page(page_index)
+                      pix=page.get_pixmap(matrix=fitz.Matrix(1.5,1.5), alpha=False)
+                      pix.save(dest/f'{i+1:02d}-page-{page_index+1:03d}.png')
+          PY
+      - name: Upload original printed PDF samples and verification previews
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: 408-browser-pdf-smoke-${{ github.run_id }}
+          path: artifacts/pdf
+          retention-days: 30
+          compression-level: 6

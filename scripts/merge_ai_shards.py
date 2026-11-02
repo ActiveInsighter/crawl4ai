@@ -5,6 +5,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import hashlib
+import re
+import xml.etree.ElementTree as ET
 import shutil
 import tempfile
 import zipfile
@@ -62,6 +65,93 @@ def render_navigation(items: list[dict]) -> str:
     return "\n".join(lines)
 
 
+
+def verify_page_integrity(record: dict, output_dir: Path) -> list[str]:
+    """Validate the actual merged files, not just a crawler success flag."""
+    if not record.get("success"):
+        return ["page_extract_failed"]
+    relative = str(record.get("output_dir") or "")
+    if not relative.startswith("pages/") or ".." in Path(relative).parts:
+        return ["invalid_page_directory"]
+    page = output_dir / relative
+    issues = []
+    for name in ("content.md", "content.html"):
+        if not (page / name).is_file() or (page / name).stat().st_size == 0:
+            issues.append("missing_" + name.replace(".", "_"))
+    if record.get("browser_rendered") and not (page / "browser-rendered.html").is_file():
+        issues.append("missing_browser_rendered_html")
+    md_path = page / "content.md"
+    if md_path.is_file():
+        md = md_path.read_text(encoding="utf-8")
+        # All generated relative assets must exist and have nonzero size.
+        for asset in set(re.findall(r"(?:src=[\"']|]\()(assets/[^)\s\"']+)", md)):
+            target = (page / asset).resolve()
+            if not target.is_relative_to(page.resolve()) or not target.is_file():
+                issues.append("missing_local_asset")
+            elif not target.stat().st_size:
+                issues.append("empty_local_asset")
+    for svg in (page / "assets" / "svg").glob("*.svg"):
+        try:
+            ET.parse(svg)
+        except ET.ParseError:
+            issues.append("invalid_svg_xml")
+    for file in (page / "assets").rglob("*") if (page / "assets").exists() else ():
+        if file.is_file() and not file.stat().st_size:
+            issues.append("empty_local_asset")
+    stats = record.get("math") or {}
+    if stats and stats.get("total", 0) != (
+        stats.get("tex", 0) + stats.get("image", 0) + stats.get("unresolved", 0)
+    ):
+        issues.append("math_accounting_mismatch")
+    # SHA-256 of actual merged output supports reproducible downstream imports.
+    hashes = {}
+    for name in ("content.md", "content.html", "browser-rendered.html"):
+        path = page / name
+        if path.is_file():
+            hashes[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    assets = {}
+    asset_dir = page / "assets"
+    if asset_dir.is_dir():
+        for file in sorted(asset_dir.rglob("*")):
+            if file.is_file():
+                assets[file.relative_to(page).as_posix()] = {
+                    "sha256": hashlib.sha256(file.read_bytes()).hexdigest(),
+                    "bytes": file.stat().st_size,
+                }
+    record["content_sha256"] = hashes
+    record["asset_integrity"] = assets
+    return sorted(set(issues))
+
+
+def build_quality_report(records: list[dict]) -> dict:
+    by_subject: dict[str, dict[str, int]] = {}
+    failed = []
+    labels = {
+        "data_structure": "数据结构",
+        "constitution_principle": "计算机组成原理",
+        "operating_system": "操作系统",
+        "computer_network": "计算机网络",
+    }
+    for record in records:
+        path = str(record.get("output_dir") or "")
+        category = next((label for prefix, label in labels.items()
+                         if path.startswith("pages/" + prefix + "/")), "其他")
+        item = by_subject.setdefault(category, {"pages": 0, "passed": 0, "review": 0})
+        item["pages"] += 1
+        if record.get("quality_pass"):
+            item["passed"] += 1
+        else:
+            item["review"] += 1
+            failed.append({"url": record.get("url"), "issues": record.get("quality_issues", [])})
+    return {
+        "page_count": len(records),
+        "quality_pass_count": sum(bool(r.get("quality_pass")) for r in records),
+        "quality_review_count": len(failed),
+        "subjects": by_subject,
+        "needs_review": failed,
+        "note": "Mechanical integrity checks do not establish subject-matter correctness.",
+    }
+
 def merge(shards_dir: Path, output_dir: Path) -> dict:
     archives = sorted(shards_dir.glob("*.zip"))
     if not archives:
@@ -108,6 +198,17 @@ def merge(shards_dir: Path, output_dir: Path) -> dict:
                 shutil.copytree(shard_pages, pages_root, dirs_exist_ok=True)
 
     records = sorted(records_by_url.values(), key=lambda item: urlsplit(str(item.get("url", ""))).path)
+    for record in records:
+        issues = set(record.get("quality_issues", []))
+        issues.update(verify_page_integrity(record, output_dir))
+        if not record.get("browser_rendered"):
+            issues.add("browser_render_failed")
+        record["quality_issues"] = sorted(issues)
+        record["quality_pass"] = not issues
+    quality_report = build_quality_report(records)
+    (output_dir / "quality-report.json").write_text(
+        json.dumps(quality_report, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     page_map = {str(record.get("url")): record for record in records if record.get("url")}
     navigation = sorted(nav_sections.values(), key=lambda item: urlsplit(str(item.get("url", ""))).path)
     attach_local_paths(navigation, page_map)
@@ -123,6 +224,8 @@ def merge(shards_dir: Path, output_dir: Path) -> dict:
         "failure_count": len(failures),
         "browser_render_success_count": len(records) - len(browser_render_failures),
         "browser_render_failure_count": len(browser_render_failures),
+        "quality_pass_count": quality_report["quality_pass_count"],
+        "quality_review_count": quality_report["quality_review_count"],
         "pages": records,
         "failures": failures,
         "browser_render_failures": browser_render_failures,
@@ -140,7 +243,8 @@ def merge(shards_dir: Path, output_dir: Path) -> dict:
         "This archive keeps the full Chromium-rendered DOM for maximum fidelity while still providing compact AI-friendly derivatives. It intentionally contains no PDF.\n\n"
         "## Structure\n\n"
         "- `navigation.md` / `navigation.json`: site document hierarchy and local links.\n"
-        "- `manifest.json`: source URL, page status, output path, rendered-HTML status and asset counts for every page.\n"
+        "- `manifest.json`: page status, formula/image/SVG counts and audit issues.\n"
+        "- `quality-report.json`: per-subject pass/review counts and every degraded URL.\n"
         "- `pages/<original-url-path>/browser-rendered.html`: full page DOM after Chromium loaded and executed the page. This is the richest HTML source.\n"
         "- `pages/<original-url-path>/content.html`: cleaned article HTML derived from the browser-rendered DOM.\n"
         "- `pages/<original-url-path>/content.md`: AI-friendly Markdown derived from the same rendered DOM.\n"
@@ -149,6 +253,8 @@ def merge(shards_dir: Path, output_dir: Path) -> dict:
         "For maximum information fidelity, read `browser-rendered.html`; use `content.md` for fast text retrieval and `content.html`/SVG for focused formula or diagram inspection.\n",
         encoding="utf-8",
     )
+    print(f"[QUALITY] {quality_report['quality_pass_count']}/{quality_report['page_count']} verified; "
+          f"{quality_report['quality_review_count']} need review", flush=True)
     print(
         json.dumps(
             {k: v for k, v in final_manifest.items() if k not in {"pages", "failures", "browser_render_failures", "shards"}},
