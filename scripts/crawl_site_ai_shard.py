@@ -112,6 +112,7 @@ async def capture_unrecoverable_math(page, page_dir: Path) -> tuple[int, list[di
         );
         const seen = new Set();
         const ids = [];
+        let nextId = Number(document.body.getAttribute('data-archive-next-formula-id') || 1);
         for (const node of candidates) {
             if (node.tagName.toLowerCase() === 'math' &&
                 (node.closest('.katex') || node.closest('mjx-container'))) continue;
@@ -127,12 +128,13 @@ async def capture_unrecoverable_math(page, page_dir: Path) -> tuple[int, list[di
                     if (element.querySelector('script[type^="math/tex"]')) known = true;
                 }
             }
-            if (!known) {
-                const id = String(ids.length + 1).padStart(4, '0');
+            if (!known && !target.getAttribute('data-archive-formula-image')) {
+                const id = String(nextId++).padStart(4, '0');
                 target.setAttribute('data-archive-formula-shot-id', id);
                 ids.push(id);
             }
         }
+        document.body.setAttribute('data-archive-next-formula-id', String(nextId));
         return ids;
     }""")
     failures = []
@@ -195,16 +197,19 @@ async def capture_svg_previews(page, page_dir: Path) -> tuple[int, list[dict], l
     ids = await page.evaluate(r"""() => {
         const nodes = document.querySelectorAll('.td-content svg');
         const ids = [];
+        let nextId = Number(document.body.getAttribute('data-archive-next-svg-id') || 1);
         for (const svg of nodes) {
             if (svg.closest('.katex') || svg.closest('mjx-container')) continue;
             if (svg.parentElement?.closest('svg')) continue;
             if (svg.getAttribute('aria-hidden') === 'true') continue;
             if (['presentation', 'none'].includes(svg.getAttribute('role'))) continue;
             if (svg.classList.contains('kp-icon')) continue;
-            const id = String(ids.length + 1).padStart(3, '0');
+            if (svg.hasAttribute('data-archive-svg-serialized')) continue;
+            const id = String(nextId++).padStart(3, '0');
             svg.setAttribute('data-archive-svg-shot-id', id);
             ids.push(id);
         }
+        document.body.setAttribute('data-archive-next-svg-id', String(nextId));
         return ids;
     }""")
     previews, failures, xml_assets = 0, [], []
@@ -383,8 +388,27 @@ async def render_pages(
                             page_dir = core.output_dir_for_url(url, root)
                             page_dir.mkdir(parents=True, exist_ok=True)
                             (page_dir / "browser-rendered.html").write_text(original_dom, encoding="utf-8")
-                            capture_count, capture_errors = await capture_unrecoverable_math(page, page_dir)
-                            svg_preview_count, svg_preview_errors, xml_assets = await capture_svg_previews(page, page_dir)
+                            capture_count, capture_errors = 0, []
+                            svg_preview_count, svg_preview_errors, xml_assets = 0, [], []
+                            # Some pages lazily insert additional KaTeX and SVG
+                            # nodes after the first render. Capture twice or
+                            # until stable, never reusing an asset ID.
+                            for capture_round in range(3):
+                                count, errors = await capture_unrecoverable_math(page, page_dir)
+                                previews, svg_errors, new_xml = await capture_svg_previews(page, page_dir)
+                                capture_count += count
+                                capture_errors.extend(errors)
+                                svg_preview_count += previews
+                                svg_preview_errors.extend(svg_errors)
+                                xml_assets.extend(new_xml)
+                                if capture_round > 0 and count == 0 and previews == 0:
+                                    break
+                                await page.wait_for_timeout(450)
+                            # Save the DOM only after the dynamic content has
+                            # stabilized. The earlier page HTML may be partial.
+                            (page_dir / "browser-rendered.html").write_text(
+                                await page.content(), encoding="utf-8",
+                            )
                             await page.evaluate("""() => {
                                 document.querySelectorAll('.td-content img').forEach(img => {
                                     const src = img.currentSrc;
