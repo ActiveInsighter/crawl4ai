@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import fitz
+import pymupdf as fitz
 
 from scripts.render_408_pdf_shard import SUBJECTS, decode_urls, inspect_pdf, relative_pdf
 
